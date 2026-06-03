@@ -1,0 +1,32 @@
+name: Daily Investment Report
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  generate-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install --quiet requests
+      - name: Generate daily report
+        env:
+          XINIU_API_KEY: ${{ secrets.XINIU_API_KEY }}
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          GITHUB_OUTPUT_DIR: ./output
+        run: python main.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: daily-report-${{ github.run_number }}
+          path: ./output/
+          retention-days: 30
