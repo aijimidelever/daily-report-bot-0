@@ -143,12 +143,21 @@ def _date_range(start, end):
     return [f"{start.strftime('%Y-%m-%d')} 00:00:00", f"{end.strftime('%Y-%m-%d')} 23:59:59"]
 
 def get_events_in_range(client, start_date, end_date, columns=None, limit=200):
-    cols = columns or INVEST_COLUMNS
-    return client.get_data(req_params=[{
+    cols = columns or BASIC_COLUMNS
+    result = client.get_data(req_params=[{
         "table": INVEST_TABLE,
         "selected_columns": cols,
         "filters": [{"field": "invest_date", "type": "range", "value": _date_range(start_date, end_date)}]
     }], limit=limit)
+    # 如果扩展字段查询失败，回退到基础字段
+    if not result or (isinstance(result, dict) and result.get("count", 0) == 0 and cols != BASIC_COLUMNS):
+        print(f"  扩展字段查询为空，回退到基础字段...")
+        result = client.get_data(req_params=[{
+            "table": INVEST_TABLE,
+            "selected_columns": BASIC_COLUMNS,
+            "filters": [{"field": "invest_date", "type": "range", "value": _date_range(start_date, end_date)}]
+        }], limit=limit)
+    return result
 
 def get_yesterday_events(client):
     yesterday = datetime.date.today() - datetime.timedelta(days=1)
