@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-每日投融资日报自动生成 + 邮件推送
+每日投融资日报 - 公众号兼容版
+特点：纯内联样式、表格布局、一键复制到公众号编辑器
 数据来源：烯牛创投数据 MCP API
-优化版本 - 更多维分析、更丰富内容
 """
 import json
 import os
@@ -70,7 +70,7 @@ class XiniuMCPClient:
     def initialize(self):
         return self._call("initialize", {
             "protocolVersion": "2024-11-05", "capabilities": {},
-            "clientInfo": {"name": "daily-report-bot", "version": "2.0.0"}
+            "clientInfo": {"name": "daily-report-bot", "version": "3.0.0"}
         })
 
     def call_tool(self, tool_name, arguments):
@@ -160,21 +160,21 @@ def format_amount(amount_str):
     except (ValueError, TypeError):
         return str(amount_str)
 
-def trend_icon(current, previous):
+def trend_text(current, previous):
     if previous == 0 and current > 0:
-        return '<span style="color:#27ae60;">▲ 新增</span>'
+        return "↑新增"
     elif previous == 0:
-        return '<span style="color:#999;">—</span>'
+        return "—"
     pct = (current - previous) / previous * 100
     if pct > 5:
-        return f'<span style="color:#27ae60;">▲ +{pct:.0f}%</span>'
+        return f"↑+{pct:.0f}%"
     elif pct < -5:
-        return f'<span style="color:#e74c3c;">▼ {pct:.0f}%</span>'
+        return f"↓{pct:.0f}%"
     else:
-        return f'<span style="color:#f39c12;">● 持平</span>'
+        return "→持平"
 
-# ============ 报告生成 ============
-def generate_report(events_data, prev_events_data=None, date_str=None):
+# ============ 公众号报告生成 ============
+def generate_wx_report(events_data, prev_events_data=None, date_str=None):
     if date_str is None:
         date_str = (datetime.date.today() - datetime.timedelta(days=1)).strftime("%Y年%m月%d日")
 
@@ -182,13 +182,11 @@ def generate_report(events_data, prev_events_data=None, date_str=None):
     prev_rows, prev_count = parse_rows(prev_events_data)
 
     if not rows:
-        return f"""<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
-<body style="margin:0;padding:0;background:#f5f5f5;font-family:sans-serif;">
-<div style="max-width:650px;margin:0 auto;background:#fff;padding:40px 20px;text-align:center;">
-<h1 style="color:#0f3460;font-size:22px;">📊 投融资日报</h1>
-<p style="color:#666;font-size:14px;">{date_str}</p>
-<div style="padding:30px;color:#999;font-size:15px;">昨日暂无融资事件数据</div>
-</div></body></html>"""
+        return f"""<section style="padding:20px;text-align:center;">
+<p style="font-size:20px;font-weight:bold;color:#1a1a2e;">📊 投融资日报</p>
+<p style="font-size:14px;color:#666;">{date_str}</p>
+<p style="font-size:14px;color:#999;padding:30px 0;">昨日暂无融资事件数据</p>
+</section>"""
 
     investor_dist, type_dist, industry_dist, round_dist, region_dist = {}, {}, {}, {}, {}
     company_investors = {}
@@ -222,7 +220,6 @@ def generate_report(events_data, prev_events_data=None, date_str=None):
                 "round": safe_get(event, "inv_round_desc", "inv_round", default="-"),
                 "amount": safe_get(event, "invest_amount_cny", "invest_amount", default="-"),
                 "city": safe_get(event, "city", default="-"),
-                "desc": safe_get(event, "company_desc", default="-")
             }
         company_investors[comp]["investors"].append({
             "investor": inv, "type": inv_type,
@@ -254,174 +251,254 @@ def generate_report(events_data, prev_events_data=None, date_str=None):
     prev_investor_count = len(set(safe_get(e, "fund_com_entity_gs_name", default="x") for e in prev_rows)) if prev_rows else 0
     prev_company_count = len(set(safe_get(e, "project_name", "company_gs_name", default="x") for e in prev_rows)) if prev_rows else 0
 
-    def bars(data, color1, color2, max_items=10):
-        mx = data[0][1] if data else 1
-        html = ""
-        for name, cnt in data[:max_items]:
-            short = name[:14] + "..." if len(name) > 14 else name
-            pct = max(int(cnt / mx * 100), 5)
-            html += f'''<div style="margin-bottom:10px;">
-                <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:3px;">
-                    <span style="color:#333;">{short}</span><span style="color:#888;">{cnt}起</span>
-                </div>
-                <div style="background:#f0f0f0;border-radius:6px;height:22px;overflow:hidden;">
-                    <div style="background:linear-gradient(90deg,{color1},{color2});width:{pct}%;height:100%;border-radius:6px;"></div>
-                </div>
-            </div>'''
-        return html
+    t_events = trend_text(count, prev_count)
+    t_companies = trend_text(len(company_investors), prev_company_count)
+    t_investors = trend_text(len(investor_dist), prev_investor_count)
 
-    def pie_items(data, colors):
-        html = '<div style="display:flex;flex-wrap:wrap;gap:8px;">'
-        for i, (name, cnt) in enumerate(data[:8]):
-            c = colors[i % len(colors)]
-            short = name[:8] + ".." if len(name) > 8 else name
-            html += f'<div style="background:{c}15;border:1px solid {c}40;border-radius:8px;padding:6px 12px;font-size:12px;">'
-            html += f'<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:{c};margin-right:4px;"></span>'
-            html += f'{short} <b>{cnt}</b></div>'
-        html += '</div>'
-        return html
+    # ========= 公众号兼容 HTML =========
 
-    inv_bars = bars(investor_sorted, "#667eea", "#764ba2", 15)
-    industry_bars = bars(industry_sorted, "#00b894", "#00cec9", 10)
+    # --- 标题区 ---
+    html = f"""<section style="max-width:677px;margin:0 auto;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif;color:#333;line-height:1.8;font-size:15px;">
+
+<section style="background:#1a1a2e;color:#fff;text-align:center;padding:30px 15px;border-radius:8px 8px 0 0;">
+<p style="font-size:22px;font-weight:bold;margin:0;letter-spacing:2px;">📊 投融资日报</p>
+<p style="font-size:13px;margin:8px 0 0;color:rgba(255,255,255,0.7);">{date_str}</p>
+</section>
+
+<section style="background:#fff;border:1px solid #eee;border-top:none;">
+<table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;">
+<tr>
+<td style="text-align:center;padding:18px 10px;border-right:1px solid #f0f0f0;width:33.3%;">
+<p style="font-size:30px;font-weight:bold;color:#1a1a2e;margin:0;">{count}</p>
+<p style="font-size:12px;color:#999;margin:4px 0 0;">投资事件</p>
+<p style="font-size:11px;color:#27ae60;margin:4px 0 0;">{t_events}</p>
+</td>
+<td style="text-align:center;padding:18px 10px;border-right:1px solid #f0f0f0;width:33.3%;">
+<p style="font-size:30px;font-weight:bold;color:#e74c3c;margin:0;">{len(company_investors)}</p>
+<p style="font-size:12px;color:#999;margin:4px 0 0;">获投企业</p>
+<p style="font-size:11px;color:#27ae60;margin:4px 0 0;">{t_companies}</p>
+</td>
+<td style="text-align:center;padding:18px 10px;width:33.3%;">
+<p style="font-size:30px;font-weight:bold;color:#533483;margin:0;">{len(investor_dist)}</p>
+<p style="font-size:12px;color:#999;margin:4px 0 0;">投资方</p>
+<p style="font-size:11px;color:#27ae60;margin:4px 0 0;">{t_investors}</p>
+</td>
+</tr>
+</table>
+</section>"""
+
+    # --- 大额融资亮点 ---
+    if major_deals_sorted:
+        html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;">
+<p style="font-size:16px;font-weight:bold;color:#e74c3c;border-left:4px solid #e74c3c;padding-left:10px;margin:0 0 12px;">🔥 大额融资亮点</p>"""
+        for d in major_deals_sorted:
+            amt_display = format_amount(d["amount"])
+            html += f"""<section style="background:#fff5f5;border-left:4px solid #e74c3c;padding:10px 14px;margin-bottom:8px;border-radius:0 6px 6px 0;">
+<p style="margin:0;font-size:14px;"><strong>{d["company"]}</strong>
+<span style="display:inline-block;background:#e74c3c;color:#fff;border-radius:3px;padding:1px 6px;font-size:11px;margin-left:6px;">{amt_display}</span>
+<span style="display:inline-block;background:#dfe6e9;color:#333;border-radius:3px;padding:1px 6px;font-size:11px;margin-left:4px;">{d["round"]}</span></p>
+<p style="margin:4px 0 0;font-size:12px;color:#636e72;">{d["industry"]} · {d["city"]} · {d["investors"]}</p>
+</section>"""
+        html += "</section>"
+
+    # --- 活跃投资机构 TOP15 ---
+    html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
+<p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #667eea;padding-left:10px;margin:0 0 12px;">🏛 活跃投资机构 TOP15</p>"""
+    mx_inv = investor_sorted[0][1] if investor_sorted else 1
+    for name, cnt in investor_sorted:
+        short = name[:12] + "..." if len(name) > 12 else name
+        pct = max(int(cnt / mx_inv * 100), 8)
+        html += f"""<section style="margin-bottom:8px;">
+<table cellpadding="0" cellspacing="0" style="width:100%;"><tr>
+<td style="font-size:13px;color:#333;width:70%;">{short}</td>
+<td style="font-size:13px;color:#888;text-align:right;width:30%;">{cnt}起</td>
+</tr></table>
+<table cellpadding="0" cellspacing="0" style="width:100%;margin-top:3px;"><tr>
+<td style="background:#f0f0f0;border-radius:4px;height:18px;width:100%;">
+<table cellpadding="0" cellspacing="0" style="width:{pct}%;height:18px;border-radius:4px;background:#667eea;"><tr><td></td></tr></table>
+</td></tr></table>
+</section>"""
+    html += "</section>"
+
+    # --- 行业分布 TOP10 ---
+    html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
+<p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #00b894;padding-left:10px;margin:0 0 12px;">🏭 行业分布 TOP10</p>"""
+    mx_ind = industry_sorted[0][1] if industry_sorted else 1
+    for name, cnt in industry_sorted:
+        short = name[:12] + "..." if len(name) > 12 else name
+        pct = max(int(cnt / mx_ind * 100), 8)
+        html += f"""<section style="margin-bottom:8px;">
+<table cellpadding="0" cellspacing="0" style="width:100%;"><tr>
+<td style="font-size:13px;color:#333;width:70%;">{short}</td>
+<td style="font-size:13px;color:#888;text-align:right;width:30%;">{cnt}起</td>
+</tr></table>
+<table cellpadding="0" cellspacing="0" style="width:100%;margin-top:3px;"><tr>
+<td style="background:#f0f0f0;border-radius:4px;height:18px;width:100%;">
+<table cellpadding="0" cellspacing="0" style="width:{pct}%;height:18px;border-radius:4px;background:#00b894;"><tr><td></td></tr></table>
+</td></tr></table>
+</section>"""
+    html += "</section>"
+
+    # --- 融资轮次分布 ---
+    html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
+<p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #f39c12;padding-left:10px;margin:0 0 12px;">🔄 融资轮次分布</p>
+<table cellpadding="0" cellspacing="0" style="width:100%;">"""
     round_colors = ["#e74c3c", "#e67e22", "#f1c40f", "#2ecc71", "#3498db", "#9b59b6", "#1abc9c", "#34495e", "#e91e63", "#ff9800"]
-    round_html = pie_items(round_sorted, round_colors)
-    region_bars = bars(region_sorted, "#fd79a8", "#e17055", 10)
-    type_bars_html = bars(type_sorted, "#f093fb", "#f5576c", 10)
+    for i in range(0, min(len(round_sorted), 9), 3):
+        html += "<tr>"
+        for j in range(3):
+            if i + j < len(round_sorted):
+                name, cnt = round_sorted[i + j]
+                c = round_colors[(i + j) % len(round_colors)]
+                short = name[:6] + ".." if len(name) > 6 else name
+                html += f'<td style="padding:4px 6px;"><section style="background:{c}18;border:1px solid {c}50;border-radius:6px;padding:5px 10px;text-align:center;font-size:12px;"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:{c};margin-right:3px;"></span>{short} <strong>{cnt}</strong></section></td>'
+            else:
+                html += '<td></td>'
+        html += "</tr>"
+    html += "</table></section>"
 
-    major_html = ""
-    for d in major_deals_sorted:
-        amt_display = format_amount(d["amount"])
-        major_html += f'''<div style="background:linear-gradient(135deg,#fff5f5,#fff0f0);border-left:4px solid #e74c3c;border-radius:0 8px 8px 0;padding:12px 16px;margin-bottom:10px;">
-            <div><b style="font-size:14px;color:#2d3436;">{d["company"]}</b>
-            <span style="background:#e74c3c;color:#fff;border-radius:4px;padding:2px 8px;font-size:11px;margin-left:8px;">{amt_display}</span>
-            <span style="background:#dfe6e9;color:#2d3436;border-radius:4px;padding:2px 8px;font-size:11px;margin-left:4px;">{d["round"]}</span></div>
-            <div style="font-size:12px;color:#636e72;margin-top:4px;">{d["industry"]} · {d["city"]} · {d["investors"]}</div>
-        </div>'''
-    if not major_html:
-        major_html = '<div style="text-align:center;color:#b2bec3;padding:20px;font-size:13px;">暂无千万级以上大额融资事件</div>'
+    # --- 地区分布 TOP10 ---
+    html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
+<p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #fd79a8;padding-left:10px;margin:0 0 12px;">📍 地区分布 TOP10</p>"""
+    mx_reg = region_sorted[0][1] if region_sorted else 1
+    for name, cnt in region_sorted:
+        short = name[:12] + "..." if len(name) > 12 else name
+        pct = max(int(cnt / mx_reg * 100), 8)
+        html += f"""<section style="margin-bottom:8px;">
+<table cellpadding="0" cellspacing="0" style="width:100%;"><tr>
+<td style="font-size:13px;color:#333;width:70%;">{short}</td>
+<td style="font-size:13px;color:#888;text-align:right;width:30%;">{cnt}起</td>
+</tr></table>
+<table cellpadding="0" cellspacing="0" style="width:100%;margin-top:3px;"><tr>
+<td style="background:#f0f0f0;border-radius:4px;height:18px;width:100%;">
+<table cellpadding="0" cellspacing="0" style="width:{pct}%;height:18px;border-radius:4px;background:#fd79a8;"><tr><td></td></tr></table>
+</td></tr></table>
+</section>"""
+    html += "</section>"
 
-    comp_rows = ""
+    # --- 投资类型分布 ---
+    html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
+<p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #f5576c;padding-left:10px;margin:0 0 12px;">💰 投资类型分布</p>"""
+    mx_type = type_sorted[0][1] if type_sorted else 1
+    for name, cnt in type_sorted[:10]:
+        short = name[:12] + "..." if len(name) > 12 else name
+        pct = max(int(cnt / mx_type * 100), 8)
+        html += f"""<section style="margin-bottom:8px;">
+<table cellpadding="0" cellspacing="0" style="width:100%;"><tr>
+<td style="font-size:13px;color:#333;width:70%;">{short}</td>
+<td style="font-size:13px;color:#888;text-align:right;width:30%;">{cnt}起</td>
+</tr></table>
+<table cellpadding="0" cellspacing="0" style="width:100%;margin-top:3px;"><tr>
+<td style="background:#f0f0f0;border-radius:4px;height:18px;width:100%;">
+<table cellpadding="0" cellspacing="0" style="width:{pct}%;height:18px;border-radius:4px;background:#f5576c;"><tr><td></td></tr></table>
+</td></tr></table>
+</section>"""
+    html += "</section>"
+
+    # --- 获投企业列表 ---
+    html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
+<p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #4ECDC4;padding-left:10px;margin:0 0 12px;">🏢 获投企业列表</p>
+<table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-size:13px;">
+<tr style="background:#1a1a2e;color:#fff;">
+<td style="padding:8px;text-align:center;font-size:12px;width:30px;">#</td>
+<td style="padding:8px;font-size:12px;">企业</td>
+<td style="padding:8px;text-align:center;font-size:12px;width:60px;">金额</td>
+<td style="padding:8px;text-align:center;font-size:12px;width:50px;">投资方</td>
+</tr>"""
     for i, (cn, info) in enumerate(sorted(company_investors.items(), key=lambda x: len(x[1]["investors"]), reverse=True), 1):
-        ivs = info["investors"]
-        inv_names = "、".join([v["investor"][:8] for v in ivs[:3]])
-        if len(ivs) > 3:
-            inv_names += f"等{len(ivs)}家"
         amt_display = format_amount(info["amount"])
-        comp_rows += f'''<tr>
-            <td style="padding:10px 8px;border-bottom:1px solid #eee;font-size:12px;color:#999;text-align:center;">{i}</td>
-            <td style="padding:10px 8px;border-bottom:1px solid #eee;font-size:13px;">
-                <b style="color:#2d3436;">{cn}</b>
-                <div style="font-size:11px;color:#999;margin-top:2px;">{info["industry"]} · {info["round"]}</div>
-            </td>
-            <td style="padding:10px 8px;border-bottom:1px solid #eee;font-size:13px;font-weight:bold;color:#e74c3c;text-align:center;">{amt_display}</td>
-            <td style="padding:10px 8px;border-bottom:1px solid #eee;font-size:12px;text-align:center;">{len(ivs)}家</td>
-            <td style="padding:10px 8px;border-bottom:1px solid #eee;font-size:11px;color:#636e72;">{inv_names}</td>
-        </tr>'''
+        ivs = info["investors"]
+        bg = "#fafafa" if i % 2 == 0 else "#fff"
+        html += f"""<tr style="background:{bg};">
+<td style="padding:8px;text-align:center;color:#999;font-size:12px;">{i}</td>
+<td style="padding:8px;font-size:13px;"><strong>{cn}</strong><br/><span style="font-size:11px;color:#999;">{info["industry"]} · {info["round"]}</span></td>
+<td style="padding:8px;text-align:center;color:#e74c3c;font-weight:bold;font-size:13px;">{amt_display}</td>
+<td style="padding:8px;text-align:center;font-size:12px;">{len(ivs)}家</td>
+</tr>"""
+    html += "</table></section>"
 
+    # --- 底部 ---
     type_summary = "、".join([f"{k}({v})" for k, v in type_sorted[:5]])
-    round_summary = "、".join([f"{k}({v})" for k, v in round_sorted[:5]])
+    html += f"""<section style="padding:15px;text-align:center;color:#b2bec3;font-size:11px;border-top:1px solid #eee;margin-top:12px;">
+<p style="margin:0;">数据来源：烯牛创投数据</p>
+<p style="margin:4px 0 0;">本报告由 AI 自动生成，仅供参考，不构成投资建议</p>
+</section>
 
-    trend_events = trend_icon(count, prev_count)
-    trend_companies = trend_icon(len(company_investors), prev_company_count)
-    trend_investors = trend_icon(len(investor_dist), prev_investor_count)
+</section>"""
 
+    return html
+
+
+def generate_full_page(wx_content, date_str):
+    """生成完整HTML页面，包含一键复制按钮"""
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>投融资日报 | {date_str}</title>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>投融资日报 | {date_str} - 公众号版</title>
+<style>
+body {{ margin:0; padding:20px; background:#f0f2f5; font-family:sans-serif; }}
+.toolbar {{ position:sticky; top:0; z-index:100; background:#fff; padding:15px 20px; box-shadow:0 2px 8px rgba(0,0,0,0.1); display:flex; align-items:center; justify-content:space-between; }}
+.toolbar h1 {{ margin:0; font-size:18px; color:#1a1a2e; }}
+.btn {{ padding:10px 24px; border:none; border-radius:6px; font-size:15px; cursor:pointer; font-weight:bold; transition:all 0.2s; }}
+.btn-copy {{ background:#07c160; color:#fff; }}
+.btn-copy:hover {{ background:#06ad56; }}
+.btn-copy:active {{ transform:scale(0.96); }}
+.preview {{ max-width:677px; margin:20px auto; background:#fff; border-radius:8px; box-shadow:0 2px 12px rgba(0,0,0,0.08); overflow:hidden; }}
+.hint {{ max-width:677px; margin:0 auto 10px; font-size:13px; color:#999; text-align:center; }}
+.toast {{ position:fixed; top:80px; left:50%; transform:translateX(-50%); background:rgba(0,0,0,0.75); color:#fff; padding:10px 24px; border-radius:6px; font-size:14px; display:none; z-index:999; }}
+</style>
 </head>
-<body style="margin:0;padding:0;background:#f0f2f5;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif;">
+<body>
 
-<div style="max-width:650px;margin:0 auto;background:#fff;">
-
-<!-- 头部 -->
-<div style="background:linear-gradient(135deg,#0f3460,#16213e,#1a1a2e);padding:35px 20px;text-align:center;">
-    <h1 style="color:#fff;margin:0;font-size:24px;letter-spacing:3px;">📊 投融资日报</h1>
-    <p style="color:rgba(255,255,255,0.7);margin:8px 0 0;font-size:14px;">{date_str}</p>
-    <p style="color:rgba(255,255,255,0.5);margin:4px 0 0;font-size:11px;">数据来源：烯牛创投数据</p>
-</div>
-
-<!-- 核心指标卡片 -->
-<div style="display:flex;padding:0;background:#fff;">
-    <div style="flex:1;text-align:center;padding:20px 10px;border-right:1px solid #f0f0f0;">
-        <div style="font-size:36px;font-weight:bold;color:#0f3460;">{count}</div>
-        <div style="font-size:12px;color:#999;margin-top:4px;">投资事件</div>
-        <div style="font-size:11px;margin-top:4px;">{trend_events}</div>
-    </div>
-    <div style="flex:1;text-align:center;padding:20px 10px;border-right:1px solid #f0f0f0;">
-        <div style="font-size:36px;font-weight:bold;color:#e94560;">{len(company_investors)}</div>
-        <div style="font-size:12px;color:#999;margin-top:4px;">获投企业</div>
-        <div style="font-size:11px;margin-top:4px;">{trend_companies}</div>
-    </div>
-    <div style="flex:1;text-align:center;padding:20px 10px;">
-        <div style="font-size:36px;font-weight:bold;color:#533483;">{len(investor_dist)}</div>
-        <div style="font-size:12px;color:#999;margin-top:4px;">投资方</div>
-        <div style="font-size:11px;margin-top:4px;">{trend_investors}</div>
+<div class="toolbar">
+    <h1>📊 {date_str} 投融资日报</h1>
+    <div>
+        <button class="btn btn-copy" onclick="copyForWechat()">📋 一键复制到公众号</button>
     </div>
 </div>
 
-<!-- 大额融资亮点 -->
-<div style="padding:20px;border-top:8px solid #f0f2f5;">
-    <h2 style="font-size:16px;color:#e74c3c;border-left:4px solid #e74c3c;padding-left:10px;margin:0 0 15px;">🔥 大额融资亮点</h2>
-    {major_html}
+<p class="hint">↓ 下方是公众号预览效果，点击上方按钮复制后直接粘贴到公众号编辑器</p>
+
+<div class="preview" id="wx-content">
+{wx_content}
 </div>
 
-<!-- 活跃投资机构TOP15 -->
-<div style="padding:20px;border-top:8px solid #f0f2f5;">
-    <h2 style="font-size:16px;color:#0f3460;border-left:4px solid #667eea;padding-left:10px;margin:0 0 15px;">🏛 活跃投资机构 TOP15</h2>
-    {inv_bars}
-</div>
+<div id="toast" class="toast"></div>
 
-<!-- 行业分布 -->
-<div style="padding:20px;border-top:8px solid #f0f2f5;">
-    <h2 style="font-size:16px;color:#0f3460;border-left:4px solid #00b894;padding-left:10px;margin:0 0 15px;">🏭 行业分布 TOP10</h2>
-    {industry_bars}
-</div>
+<script>
+function copyForWechat() {{
+    const el = document.getElementById('wx-content');
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    try {{
+        const ok = document.execCommand('copy');
+        if (ok) {{
+            showToast('✅ 已复制！直接粘贴到公众号编辑器即可');
+        }} else {{
+            showToast('⚠️ 复制失败，请手动选中内容复制');
+        }}
+    }} catch(e) {{
+        showToast('⚠️ 复制失败，请手动选中内容复制');
+    }}
+    sel.removeAllRanges();
+}}
 
-<!-- 融资轮次分布 -->
-<div style="padding:20px;border-top:8px solid #f0f2f5;">
-    <h2 style="font-size:16px;color:#0f3460;border-left:4px solid #f1c40f;padding-left:10px;margin:0 0 15px;">🔄 融资轮次分布</h2>
-    {round_html}
-    <div style="font-size:12px;color:#999;margin-top:10px;">{round_summary}</div>
-</div>
+function showToast(msg) {{
+    const t = document.getElementById('toast');
+    t.innerText = msg;
+    t.style.display = 'block';
+    setTimeout(() => {{ t.style.display = 'none'; }}, 2500);
+}}
+</script>
 
-<!-- 地区分布 -->
-<div style="padding:20px;border-top:8px solid #f0f2f5;">
-    <h2 style="font-size:16px;color:#0f3460;border-left:4px solid #fd79a8;padding-left:10px;margin:0 0 15px;">📍 地区分布 TOP10</h2>
-    {region_bars}
-</div>
+</body>
+</html>"""
 
-<!-- 投资类型分布 -->
-<div style="padding:20px;border-top:8px solid #f0f2f5;">
-    <h2 style="font-size:16px;color:#0f3460;border-left:4px solid #f5576c;padding-left:10px;margin:0 0 15px;">💰 投资类型分布</h2>
-    {type_bars_html}
-</div>
-
-<!-- 获投企业列表 -->
-<div style="padding:20px;border-top:8px solid #f0f2f5;">
-    <h2 style="font-size:16px;color:#0f3460;border-left:4px solid #4ECDC4;padding-left:10px;margin:0 0 15px;">🏢 获投企业列表（共{len(company_investors)}家）</h2>
-    <div style="overflow-x:auto;">
-        <table style="width:100%;border-collapse:collapse;">
-            <thead><tr style="background:#0f3460;color:#fff;">
-                <th style="padding:10px 8px;text-align:left;font-size:12px;width:30px;">#</th>
-                <th style="padding:10px 8px;text-align:left;font-size:12px;">企业</th>
-                <th style="padding:10px 8px;text-align:center;font-size:12px;">金额</th>
-                <th style="padding:10px 8px;text-align:center;font-size:12px;">投资方数</th>
-                <th style="padding:10px 8px;text-align:left;font-size:12px;">主要投资方</th>
-            </tr></thead>
-            <tbody>{comp_rows}</tbody>
-        </table>
-    </div>
-</div>
-
-<!-- 底部 -->
-<div style="padding:20px;border-top:8px solid #f0f2f5;text-align:center;color:#b2bec3;font-size:11px;">
-    <p>投资类型：{type_summary}</p>
-    <p style="margin-top:5px;">本报告由 AI 自动生成，仅供参考，不构成投资建议</p>
-</div>
-
-</div>
-</body></html>"""
 
 # ============ 邮件发送 ============
 def send_email(html_content, date_str):
@@ -470,16 +547,19 @@ def main():
     yesterday = datetime.date.today() - datetime.timedelta(days=1)
     date_str = yesterday.strftime("%Y年%m月%d日")
 
-    html = generate_report(events_data, prev_events_data, date_str)
+    wx_content = generate_wx_report(events_data, prev_events_data, date_str)
+    full_html = generate_full_page(wx_content, date_str)
 
     output_dir = os.environ.get("GITHUB_OUTPUT_DIR", "")
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
+        with open(os.path.join(output_dir, f"wx_report_{yesterday.strftime('%Y%m%d')}.html"), "w", encoding="utf-8") as f:
+            f.write(wx_content)
         with open(os.path.join(output_dir, f"report_{yesterday.strftime('%Y%m%d')}.html"), "w", encoding="utf-8") as f:
-            f.write(html)
+            f.write(full_html)
         print(f"  报告已保存至 {output_dir}")
 
-    success = send_email(html, date_str)
+    success = send_email(wx_content, date_str)
     return 0 if success else 1
 
 if __name__ == "__main__":
