@@ -159,6 +159,11 @@ def get_recent_events(client, days=3):
     start_date = yesterday - datetime.timedelta(days=days)
     return get_events_in_range(client, start_date, yesterday)
 
+def get_previous_day_events(client):
+    """获取前天数据用于趋势对比"""
+    day_before = datetime.date.today() - datetime.timedelta(days=2)
+    return get_events_in_range(client, day_before, day_before, columns=BASIC_COLUMNS)
+
 def get_7day_events(client):
     """获取7天数据用于趋势分析"""
     yesterday = datetime.date.today() - datetime.timedelta(days=1)
