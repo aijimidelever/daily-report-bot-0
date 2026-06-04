@@ -10,13 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-
       - run: pip install --quiet requests
-
       - name: Generate daily report
         env:
           XINIU_API_KEY: ${{ secrets.XINIU_API_KEY }}
@@ -27,8 +24,9 @@ jobs:
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           GITHUB_OUTPUT_DIR: ./output
         run: python main.py
-
       - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: daily-report-${{ github.run_number }}
+          path: ./output/
+          retention-days: 30
