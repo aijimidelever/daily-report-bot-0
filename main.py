@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-每日投融资日报 - 公众号兼容版 V4
-升级：多表数据 + 7天趋势 + 交叉分析 + 重点企业画像 + 市场观察 + LP出资 + 基金动态
+每日投融资日报 - 公众号兼容版 V5
+基于烯牛数据真实字段名重写
 数据来源：烯牛创投数据 MCP API
 """
 import json
@@ -9,7 +9,6 @@ import os
 import sys
 import smtplib
 import datetime
-import math
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
@@ -71,7 +70,7 @@ class XiniuMCPClient:
     def initialize(self):
         return self._call("initialize", {
             "protocolVersion": "2024-11-05", "capabilities": {},
-            "clientInfo": {"name": "daily-report-bot", "version": "4.0.0"}
+            "clientInfo": {"name": "daily-report-bot", "version": "5.0.0"}
         })
 
     def call_tool(self, tool_name, arguments):
@@ -89,127 +88,157 @@ class XiniuMCPClient:
                     return {"rows": [], "count": 0, "raw": text}
         return None
 
-    def get_company_info(self, firm_name, aspect="basic"):
-        """获取公司画像信息"""
-        result = self.call_tool("get_company_info", {"firm_name": firm_name, "aspect": aspect})
-        if result and isinstance(result, dict):
-            content = result.get("content", [])
-            if content:
-                return content[0].get("text", "")
-        return None
-
-    def get_entity_profile(self, entity_type, firm_name):
-        """获取投资机构/基金画像"""
-        result = self.call_tool("get_entity_profile", {"entity_type": entity_type, "firm_name": firm_name})
-        if result and isinstance(result, dict):
-            content = result.get("content", [])
-            if content:
-                return content[0].get("text", "")
-        return None
-
-# ============ 数据表配置 ============
+# ============ 数据表 & 字段（真实字段名）============
 INVEST_TABLE = "entity_invest_event.e_investor_entity_invest_firm"
 FUND_TABLE = "entity_investor.e_fund"
 LP_TABLE = "ai_chat.v_lp_invest_fund"
-COMPANY_TABLE = "tsb_v2.company"
-FUNDING_TABLE = "tsb_v2.funding"
 
-INVEST_COLUMNS = [
+# 投融资事件 - 查询字段（英文key是查询用的）
+INVEST_QUERY_COLUMNS = [
     "company_gs_name", "project_name", "invest_date",
     "fund_com_entity_gs_name", "share_percent", "fund_type_desc",
-    "industry", "sub_industry", "inv_round", "invest_amount",
-    "currency", "province", "city", "company_desc", "inv_round_desc",
-    "invest_amount_cny"
+    "industry_name_select", "xn_industry_select",
+    "company_province", "company_city",
+    "company_brief_intro"
 ]
 
-FUND_COLUMNS = [
-    "fund_name", "fund_com_entity_gs_name", "setup_date",
-    "fund_type_desc", "target_size", "actual_size", "currency",
-    "province", "city", "management_form", "fund_status"
-]
+# 投融资事件 - 返回数据中文key映射
+KEY_MAP = {
+    "被投公司工商名称": "company_gs_name",
+    "被投公司项目名称": "project_name",
+    "投资日期": "invest_date",
+    "公司类投资实体和基金工商名称": "fund_com_entity_gs_name",
+    "出资比例(%)": "share_percent",
+    "投资实体类型": "fund_type_desc",
+    "被投公司所属赛道": "industry",
+    "烯牛行业": "industry2",
+    "公司地区(省)": "province",
+    "公司地区(市)": "city",
+    "公司一句话简介": "company_desc",
+}
 
-LP_COLUMNS = [
-    "lp_name", "fund_name", "invest_date", "invest_amount",
-    "currency", "lp_type_desc", "province", "city"
-]
-
-BASIC_COLUMNS = [
+BASIC_QUERY_COLUMNS = [
     "company_gs_name", "project_name", "invest_date",
     "fund_com_entity_gs_name", "share_percent", "fund_type_desc"
 ]
 
-# ============ 数据获取函数 ============
+# 基金表字段
+FUND_QUERY_COLUMNS = [
+    "firm_name", "investor_name", "fund_establish_date",
+    "register_capital", "amac_status", "money_type",
+    "fund_location_province", "fund_location_city",
+    "xiniu_fund_type_select", "status"
+]
+
+# 基金表中文key映射
+FUND_KEY_MAP = {
+    "基金名称": "fund_name",
+    "所属机构": "investor_name",
+    "基金成立日期": "setup_date",
+    "基金管理规模(元)": "target_size",
+    "基金备案状态": "amac_status",
+    "币种": "currency",
+    "基金注册地址(省)": "province",
+    "基金注册地址(市)": "city",
+    "烯牛基金类型": "fund_type",
+    "经营状态": "status",
+}
+
+# LP表字段
+LP_QUERY_COLUMNS = [
+    "lp_name", "fund_name", "invest_date",
+    "lp_invest_amount", "lp_type_select", "lp_type_main",
+    "investor_name", "fund_capi"
+]
+
+LP_KEY_MAP = {
+    "LP名称": "lp_name",
+    "基金名称": "fund_name",
+    "出资日期": "invest_date",
+    "出资金额(元)": "invest_amount",
+    "LP类型": "lp_type",
+    "LP类型(主要)": "lp_type_main",
+    "基金所属机构": "investor_name",
+    "基金规模(元)": "fund_capi",
+}
+
+# ============ 数据规范化 ============
+def normalize_row(row, key_map):
+    """将中文key的行数据转为英文key"""
+    result = {}
+    for cn_key, en_key in key_map.items():
+        if cn_key in row:
+            val = row[cn_key]
+            if val is not None and val != "" and val != "None":
+                result[en_key] = val
+    return result
+
+def normalize_rows(rows, key_map):
+    """批量规范化行数据"""
+    return [normalize_row(row, key_map) for row in rows]
+
+# ============ 数据获取 ============
 def _date_range(start, end):
     return [f"{start.strftime('%Y-%m-%d')} 00:00:00", f"{end.strftime('%Y-%m-%d')} 23:59:59"]
 
-def get_events_in_range(client, start_date, end_date, columns=None, limit=200):
-    cols = columns or BASIC_COLUMNS
-    result = client.get_data(req_params=[{
+def get_invest_events(client, start_date, end_date, columns=None, limit=200):
+    cols = columns or INVEST_QUERY_COLUMNS
+    data = client.get_data(req_params=[{
         "table": INVEST_TABLE,
         "selected_columns": cols,
         "filters": [{"field": "invest_date", "type": "range", "value": _date_range(start_date, end_date)}]
     }], limit=limit)
-    # 如果扩展字段查询失败，回退到基础字段
-    if not result or (isinstance(result, dict) and result.get("count", 0) == 0 and cols != BASIC_COLUMNS):
-        print(f"  扩展字段查询为空，回退到基础字段...")
-        result = client.get_data(req_params=[{
-            "table": INVEST_TABLE,
-            "selected_columns": BASIC_COLUMNS,
-            "filters": [{"field": "invest_date", "type": "range", "value": _date_range(start_date, end_date)}]
-        }], limit=limit)
-    return result
+    if not data or not isinstance(data, dict):
+        return [], 0
+    rows = normalize_rows(data.get("rows", []), KEY_MAP)
+    return rows, data.get("count", 0)
 
 def get_yesterday_events(client):
     yesterday = datetime.date.today() - datetime.timedelta(days=1)
-    return get_events_in_range(client, yesterday, yesterday)
+    return get_invest_events(client, yesterday, yesterday)
 
-def get_recent_events(client, days=3):
+def get_recent_events(client, days=7):
     yesterday = datetime.date.today() - datetime.timedelta(days=1)
     start_date = yesterday - datetime.timedelta(days=days)
-    return get_events_in_range(client, start_date, yesterday)
+    return get_invest_events(client, start_date, yesterday)
 
 def get_previous_day_events(client):
-    """获取前天数据用于趋势对比"""
     day_before = datetime.date.today() - datetime.timedelta(days=2)
-    return get_events_in_range(client, day_before, day_before, columns=BASIC_COLUMNS)
+    return get_invest_events(client, day_before, day_before, columns=BASIC_QUERY_COLUMNS)
 
-def get_7day_events(client):
-    """获取7天数据用于趋势分析"""
+def get_7day_trend(client):
+    """获取7天趋势数据"""
     yesterday = datetime.date.today() - datetime.timedelta(days=1)
     start_date = yesterday - datetime.timedelta(days=6)
-    return get_events_in_range(client, start_date, yesterday, columns=[
-        "invest_date", "company_gs_name", "fund_com_entity_gs_name",
-        "invest_amount_cny", "invest_amount", "industry", "inv_round_desc"
+    return get_invest_events(client, start_date, yesterday, columns=[
+        "invest_date", "company_gs_name", "fund_com_entity_gs_name"
     ], limit=500)
 
 def get_new_funds(client, days=7):
-    """获取新设基金"""
     yesterday = datetime.date.today() - datetime.timedelta(days=1)
     start_date = yesterday - datetime.timedelta(days=days)
-    return client.get_data(req_params=[{
+    data = client.get_data(req_params=[{
         "table": FUND_TABLE,
-        "selected_columns": FUND_COLUMNS,
-        "filters": [{"field": "setup_date", "type": "range", "value": _date_range(start_date, yesterday)}]
+        "selected_columns": FUND_QUERY_COLUMNS,
+        "filters": [{"field": "fund_establish_date", "type": "range", "value": _date_range(start_date, yesterday)}]
     }], limit=50)
+    if not data or not isinstance(data, dict):
+        return [], 0
+    rows = normalize_rows(data.get("rows", []), FUND_KEY_MAP)
+    return rows, data.get("count", 0)
 
 def get_lp_events(client, days=7):
-    """获取LP出资事件"""
     yesterday = datetime.date.today() - datetime.timedelta(days=1)
     start_date = yesterday - datetime.timedelta(days=days)
-    return client.get_data(req_params=[{
+    data = client.get_data(req_params=[{
         "table": LP_TABLE,
-        "selected_columns": LP_COLUMNS,
+        "selected_columns": LP_QUERY_COLUMNS,
         "filters": [{"field": "invest_date", "type": "range", "value": _date_range(start_date, yesterday)}]
     }], limit=50)
-
-def parse_rows(events_data):
-    if not events_data:
+    if not data or not isinstance(data, dict):
         return [], 0
-    if isinstance(events_data, dict):
-        return events_data.get("rows", []), events_data.get("count", 0)
-    if isinstance(events_data, list):
-        return events_data, len(events_data)
-    return [], 0
+    rows = normalize_rows(data.get("rows", []), LP_KEY_MAP)
+    return rows, data.get("count", 0)
 
 # ============ 辅助函数 ============
 def safe_get(event, *keys, default="-"):
@@ -221,27 +250,20 @@ def safe_get(event, *keys, default="-"):
     return default
 
 def format_amount(amount_str):
-    if not amount_str or amount_str in ["-", "None", "", "0", "0.0"]:
+    if not amount_str or amount_str in ["-", "None", "", "0", "0.0", 0]:
         return "未披露"
     try:
-        val = float(str(amount_str).replace(",", "").replace("万", ""))
-        if val >= 10000:
-            return f"{val/10000:.1f}亿"
+        val = float(str(amount_str).replace(",", ""))
+        if val >= 100000000:  # 元转亿
+            return f"{val/100000000:.1f}亿"
+        elif val >= 10000:  # 元转万
+            return f"{val/10000:.0f}万"
         elif val >= 1:
-            return f"{val:.0f}万"
+            return f"{val:.0f}元"
         else:
-            return amount_str
+            return str(amount_str)
     except (ValueError, TypeError):
         return str(amount_str)
-
-def parse_amount_num(amount_str):
-    """将金额字符串解析为数字（万元）"""
-    if not amount_str or amount_str in ["-", "None", "", "0", "0.0"]:
-        return 0
-    try:
-        return float(str(amount_str).replace(",", "").replace("万", ""))
-    except (ValueError, TypeError):
-        return 0
 
 def trend_text(current, previous):
     if previous == 0 and current > 0:
@@ -257,96 +279,57 @@ def trend_text(current, previous):
         return "→持平"
 
 # ============ 7天趋势分析 ============
-def analyze_7day_trend(rows_7day):
-    """分析7天趋势，返回每日统计"""
+def analyze_7day_trend(rows):
     daily = {}
-    for event in rows_7day:
+    for event in rows:
         date_str = safe_get(event, "invest_date", default="")
-        if date_str and len(date_str) >= 10:
-            day = date_str[:10]
+        if date_str and len(str(date_str)) >= 10:
+            day = str(date_str)[:10]
             if day not in daily:
-                daily[day] = {"events": 0, "companies": set(), "amounts": [], "investors": set()}
+                daily[day] = {"events": 0, "companies": set(), "investors": set()}
             daily[day]["events"] += 1
-            comp = safe_get(event, "company_gs_name", default="")
+            comp = safe_get(event, "company_gs_name", "project_name", default="")
             if comp and comp != "-":
                 daily[day]["companies"].add(comp)
             inv = safe_get(event, "fund_com_entity_gs_name", default="")
             if inv and inv != "-":
                 daily[day]["investors"].add(inv)
-            amt = parse_amount_num(safe_get(event, "invest_amount_cny", "invest_amount", default="0"))
-            if amt > 0:
-                daily[day]["amounts"].append(amt)
-
-    # 排序
-    sorted_days = sorted(daily.keys())
     result = []
-    for day in sorted_days:
+    for day in sorted(daily.keys()):
         d = daily[day]
-        total_amt = sum(d["amounts"])
         result.append({
-            "date": day,
-            "events": d["events"],
+            "date": day, "events": d["events"],
             "companies": len(d["companies"]),
             "investors": len(d["investors"]),
-            "total_amount": total_amt,
-            "avg_amount": total_amt / len(d["amounts"]) if d["amounts"] else 0
         })
     return result
 
-# ============ 市场观察生成 ============
-def generate_market_observation(count, company_count, investor_count, industry_sorted, round_sorted, region_sorted, trend_data, major_deals):
-    """基于数据自动生成市场观察文字"""
-    observations = []
-
-    # 1. 总体热度
+# ============ 市场观察 ============
+def generate_market_observation(count, company_count, investor_count, industry_sorted, round_sorted, region_sorted, trend_data):
+    obs = []
     if len(trend_data) >= 2:
-        yesterday = trend_data[-1]
-        day_before = trend_data[-2]
-        if yesterday["events"] > day_before["events"] * 1.2:
-            observations.append(f"市场活跃度明显提升，投资事件数较前日增长{int((yesterday['events']/day_before['events']-1)*100)}%。")
-        elif yesterday["events"] < day_before["events"] * 0.8:
-            observations.append(f"市场活跃度有所回落，投资事件数较前日下降{int((1-yesterday['events']/day_before['events'])*100)}%。")
+        y = trend_data[-1]
+        b = trend_data[-2]
+        if y["events"] > b["events"] * 1.2:
+            obs.append(f"市场活跃度明显提升，投资事件数较前日增长{int((y['events']/b['events']-1)*100)}%。")
+        elif y["events"] < b["events"] * 0.8:
+            obs.append(f"市场活跃度有所回落，投资事件数较前日下降{int((1-y['events']/b['events'])*100)}%。")
         else:
-            observations.append("市场整体保持平稳运行，投资活跃度与前日基本持平。")
-
-    # 2. 融资规模
-    if major_deals:
-        total_major = len(major_deals)
-        observations.append(f"千万级以上大额融资{total_major}起，大额资金持续流向优质项目。")
-
-    # 3. 行业热点
+            obs.append("市场整体保持平稳运行。")
     if len(industry_sorted) >= 3:
         top3 = "、".join([k for k, v in industry_sorted[:3]])
-        observations.append(f"行业热度集中在{top3}领域，资金向头部赛道集中趋势明显。")
-
-    # 4. 地域分布
+        obs.append(f"行业热度集中在{top3}领域。")
     if len(region_sorted) >= 2:
         top_city = region_sorted[0][0] if region_sorted[0][0] != "未披露" else (region_sorted[1][0] if len(region_sorted) > 1 else "")
         if top_city:
-            observations.append(f"地域方面，{top_city}地区融资事件最为集中，区域集聚效应显著。")
-
-    # 5. 轮次特征
-    if round_sorted:
-        early_rounds = sum(v for k, v in round_sorted if any(w in k for w in ["天使", "种子", "Pre-A", "A轮"]))
-        late_rounds = sum(v for k, v in round_sorted if any(w in k for w in ["C轮", "D轮", "E轮", "Pre-IPO", "战略"]))
-        if early_rounds > late_rounds * 2:
-            observations.append("融资轮次以早期为主，市场对初创项目保持较高热情。")
-        elif late_rounds > early_rounds:
-            observations.append("中后期融资占比较高，成熟项目更受资本青睐。")
-
-    return " ".join(observations) if observations else "市场整体运行平稳，投融资活动保持正常节奏。"
+            obs.append(f"{top_city}地区融资事件最为集中。")
+    return " ".join(obs) if obs else "市场整体运行平稳。"
 
 # ============ 公众号报告生成 ============
-def generate_wx_report(events_data, prev_events_data=None, trend_7day=None,
-                       funds_data=None, lp_data=None, date_str=None):
+def generate_wx_report(rows, count, prev_count, prev_investor_count, prev_company_count,
+                       trend_data, fund_rows, lp_rows, date_str=None):
     if date_str is None:
         date_str = (datetime.date.today() - datetime.timedelta(days=1)).strftime("%Y年%m月%d日")
-
-    rows, count = parse_rows(events_data)
-    prev_rows, prev_count = parse_rows(prev_events_data)
-    trend_rows_7day, _ = parse_rows(trend_7day)
-    fund_rows, fund_count = parse_rows(funds_data)
-    lp_rows, lp_count = parse_rows(lp_data)
 
     if not rows:
         return f"""<section style="padding:20px;text-align:center;">
@@ -356,65 +339,27 @@ def generate_wx_report(events_data, prev_events_data=None, trend_7day=None,
 </section>"""
 
     # ---- 统计 ----
-    investor_dist, type_dist, industry_dist, round_dist, region_dist = {}, {}, {}, {}, {}
+    investor_dist, type_dist, industry_dist, region_dist = {}, {}, {}, {}
     company_investors = {}
-    major_deals = []
-    total_amount = 0
-    amount_count = 0
-    industry_round_cross = {}  # 行业×轮次交叉
-    amount_buckets = {"1亿以上": 0, "5000万-1亿": 0, "1000万-5000万": 0, "1000万以下": 0, "未披露": 0}
 
     for event in rows:
         inv = safe_get(event, "fund_com_entity_gs_name", default="未披露")
         investor_dist[inv] = investor_dist.get(inv, 0) + 1
-
         inv_type = safe_get(event, "fund_type_desc", default="未披露")
         type_dist[inv_type] = type_dist.get(inv_type, 0) + 1
-
-        industry = safe_get(event, "sub_industry", "industry", default="未披露")
-        if industry == "-":
-            industry = safe_get(event, "industry", default="未披露")
+        industry = safe_get(event, "industry", "industry2", default="未披露")
         industry_dist[industry] = industry_dist.get(industry, 0) + 1
-
-        rnd = safe_get(event, "inv_round_desc", "inv_round", default="未披露")
-        round_dist[rnd] = round_dist.get(rnd, 0) + 1
-
-        # 行业×轮次交叉
-        ind_short = industry[:6] if industry != "未披露" else "其他"
-        rnd_short = rnd[:6] if rnd != "未披露" else "其他"
-        key = (ind_short, rnd_short)
-        industry_round_cross[key] = industry_round_cross.get(key, 0) + 1
-
         city = safe_get(event, "city", "province", default="未披露")
         if city == "-":
             city = safe_get(event, "province", default="未披露")
         region_dist[city] = region_dist.get(city, 0) + 1
 
-        # 金额统计
-        amt_str = safe_get(event, "invest_amount_cny", "invest_amount", default="-")
-        amt_num = parse_amount_num(amt_str)
-        if amt_num > 0:
-            total_amount += amt_num
-            amount_count += 1
-            if amt_num >= 10000:
-                amount_buckets["1亿以上"] += 1
-            elif amt_num >= 5000:
-                amount_buckets["5000万-1亿"] += 1
-            elif amt_num >= 1000:
-                amount_buckets["1000万-5000万"] += 1
-            else:
-                amount_buckets["1000万以下"] += 1
-        else:
-            amount_buckets["未披露"] += 1
-
         comp = safe_get(event, "project_name", "company_gs_name", default="-")
         if comp not in company_investors:
             company_investors[comp] = {
                 "investors": [],
-                "industry": safe_get(event, "sub_industry", "industry", default="-"),
-                "round": safe_get(event, "inv_round_desc", "inv_round", default="-"),
-                "amount": safe_get(event, "invest_amount_cny", "invest_amount", default="-"),
-                "city": safe_get(event, "city", default="-"),
+                "industry": industry,
+                "city": city,
                 "desc": safe_get(event, "company_desc", default="-"),
             }
         company_investors[comp]["investors"].append({
@@ -422,44 +367,25 @@ def generate_wx_report(events_data, prev_events_data=None, trend_7day=None,
             "share": event.get("share_percent"), "date": event.get("invest_date", "")
         })
 
-        if amt_num >= 1000:
-            major_deals.append({"company": comp, "amount": amt_str, "round": rnd,
-                               "industry": industry, "investors": inv, "city": city})
-
-    # 排序
     investor_sorted = sorted(investor_dist.items(), key=lambda x: x[1], reverse=True)[:15]
     type_sorted = sorted(type_dist.items(), key=lambda x: x[1], reverse=True)
     industry_sorted = sorted(industry_dist.items(), key=lambda x: x[1], reverse=True)[:10]
-    round_sorted = sorted(round_dist.items(), key=lambda x: x[1], reverse=True)
     region_sorted = sorted(region_dist.items(), key=lambda x: x[1], reverse=True)[:10]
-
-    def deal_sort_key(d):
-        return parse_amount_num(d["amount"])
-    major_deals_sorted = sorted(major_deals, key=deal_sort_key, reverse=True)[:8]
-
-    # 趋势
-    prev_investor_count = len(set(safe_get(e, "fund_com_entity_gs_name", default="x") for e in prev_rows)) if prev_rows else 0
-    prev_company_count = len(set(safe_get(e, "project_name", "company_gs_name", default="x") for e in prev_rows)) if prev_rows else 0
 
     t_events = trend_text(count, prev_count)
     t_companies = trend_text(len(company_investors), prev_company_count)
     t_investors = trend_text(len(investor_dist), prev_investor_count)
 
     # 7天趋势
-    trend_analysis = analyze_7day_trend(trend_rows_7day)
+    trend_analysis = analyze_7day_trend(trend_data) if trend_data else []
 
     # 市场观察
     market_obs = generate_market_observation(
         count, len(company_investors), len(investor_dist),
-        industry_sorted, round_sorted, region_sorted, trend_analysis, major_deals
+        industry_sorted, type_sorted, region_sorted, trend_analysis
     )
 
-    # 平均金额
-    avg_amount = total_amount / amount_count if amount_count > 0 else 0
-
-    # ========= 公众号兼容 HTML =========
-
-    # --- 标题区 ---
+    # ========= 公众号 HTML =========
     html = f"""<section style="max-width:677px;margin:0 auto;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif;color:#333;line-height:1.8;font-size:15px;">
 
 <section style="background:#1a1a2e;color:#fff;text-align:center;padding:30px 15px;border-radius:8px 8px 0 0;">
@@ -467,41 +393,35 @@ def generate_wx_report(events_data, prev_events_data=None, trend_7day=None,
 <p style="font-size:13px;margin:8px 0 0;color:rgba(255,255,255,0.7);">{date_str}</p>
 </section>
 
-<!-- 核心指标 -->
 <section style="background:#fff;border:1px solid #eee;border-top:none;">
 <table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;">
 <tr>
-<td style="text-align:center;padding:18px 8px;border-right:1px solid #f0f0f0;width:25%;">
-<p style="font-size:28px;font-weight:bold;color:#1a1a2e;margin:0;">{count}</p>
-<p style="font-size:11px;color:#999;margin:4px 0 0;">投资事件</p>
+<td style="text-align:center;padding:18px 8px;border-right:1px solid #f0f0f0;width:33.3%;">
+<p style="font-size:30px;font-weight:bold;color:#1a1a2e;margin:0;">{count}</p>
+<p style="font-size:12px;color:#999;margin:4px 0 0;">投资事件</p>
 <p style="font-size:11px;color:#27ae60;margin:2px 0 0;">{t_events}</p>
 </td>
-<td style="text-align:center;padding:18px 8px;border-right:1px solid #f0f0f0;width:25%;">
-<p style="font-size:28px;font-weight:bold;color:#e74c3c;margin:0;">{len(company_investors)}</p>
-<p style="font-size:11px;color:#999;margin:4px 0 0;">获投企业</p>
+<td style="text-align:center;padding:18px 8px;border-right:1px solid #f0f0f0;width:33.3%;">
+<p style="font-size:30px;font-weight:bold;color:#e74c3c;margin:0;">{len(company_investors)}</p>
+<p style="font-size:12px;color:#999;margin:4px 0 0;">获投企业</p>
 <p style="font-size:11px;color:#27ae60;margin:2px 0 0;">{t_companies}</p>
 </td>
-<td style="text-align:center;padding:18px 8px;border-right:1px solid #f0f0f0;width:25%;">
-<p style="font-size:28px;font-weight:bold;color:#533483;margin:0;">{len(investor_dist)}</p>
-<p style="font-size:11px;color:#999;margin:4px 0 0;">投资方</p>
+<td style="text-align:center;padding:18px 8px;width:33.3%;">
+<p style="font-size:30px;font-weight:bold;color:#533483;margin:0;">{len(investor_dist)}</p>
+<p style="font-size:12px;color:#999;margin:4px 0 0;">投资方</p>
 <p style="font-size:11px;color:#27ae60;margin:2px 0 0;">{t_investors}</p>
-</td>
-<td style="text-align:center;padding:18px 8px;width:25%;">
-<p style="font-size:28px;font-weight:bold;color:#f39c12;margin:0;">{format_amount(str(total_amount)) if total_amount > 0 else "-"}</p>
-<p style="font-size:11px;color:#999;margin:4px 0 0;">披露总金额</p>
-<p style="font-size:11px;color:#666;margin:2px 0 0;">均值{format_amount(str(round(avg_amount))) if avg_amount > 0 else "-"}</p>
 </td>
 </tr>
 </table>
 </section>"""
 
-    # --- 📝 市场观察 ---
-    html += f"""<section style="padding:16px 15px;background:linear-gradient(135deg,#f8f9ff,#f0f4ff);border:1px solid #e8ecff;border-top:none;margin-top:2px;">
+    # --- 市场观察 ---
+    html += f"""<section style="padding:16px 15px;background:#f8f9ff;border:1px solid #e8ecff;border-top:none;margin-top:2px;">
 <p style="font-size:15px;font-weight:bold;color:#1a1a2e;margin:0 0 8px;">📝 市场观察</p>
 <p style="font-size:14px;color:#444;margin:0;line-height:1.9;">{market_obs}</p>
 </section>"""
 
-    # --- 📈 7天趋势 ---
+    # --- 7天趋势 ---
     if len(trend_analysis) >= 3:
         html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
 <p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #667eea;padding-left:10px;margin:0 0 12px;">📈 近7日融资趋势</p>
@@ -511,36 +431,19 @@ def generate_wx_report(events_data, prev_events_data=None, trend_7day=None,
 <td style="padding:6px 8px;font-weight:bold;color:#666;text-align:center;">事件</td>
 <td style="padding:6px 8px;font-weight:bold;color:#666;text-align:center;">企业</td>
 <td style="padding:6px 8px;font-weight:bold;color:#666;text-align:center;">投资方</td>
-<td style="padding:6px 8px;font-weight:bold;color:#666;text-align:center;">披露金额</td>
 </tr>"""
         for i, day_data in enumerate(trend_analysis):
             bg = "#fafafa" if i % 2 == 0 else "#fff"
-            date_short = day_data["date"][5:]  # MM-DD
-            amt_display = format_amount(str(day_data["total_amount"])) if day_data["total_amount"] > 0 else "-"
+            date_short = day_data["date"][5:]
             html += f"""<tr style="background:{bg};">
 <td style="padding:6px 8px;">{date_short}</td>
 <td style="padding:6px 8px;text-align:center;font-weight:bold;color:#1a1a2e;">{day_data["events"]}</td>
 <td style="padding:6px 8px;text-align:center;color:#e74c3c;">{day_data["companies"]}</td>
 <td style="padding:6px 8px;text-align:center;color:#533483;">{day_data["investors"]}</td>
-<td style="padding:6px 8px;text-align:center;color:#f39c12;">{amt_display}</td>
 </tr>"""
         html += "</table></section>"
 
-    # --- 🔥 大额融资亮点 ---
-    if major_deals_sorted:
-        html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
-<p style="font-size:16px;font-weight:bold;color:#e74c3c;border-left:4px solid #e74c3c;padding-left:10px;margin:0 0 12px;">🔥 大额融资亮点</p>"""
-        for d in major_deals_sorted:
-            amt_display = format_amount(d["amount"])
-            html += f"""<section style="background:#fff5f5;border-left:4px solid #e74c3c;padding:10px 14px;margin-bottom:8px;border-radius:0 6px 6px 0;">
-<p style="margin:0;font-size:14px;"><strong>{d["company"]}</strong>
-<span style="display:inline-block;background:#e74c3c;color:#fff;border-radius:3px;padding:1px 6px;font-size:11px;margin-left:6px;">{amt_display}</span>
-<span style="display:inline-block;background:#dfe6e9;color:#333;border-radius:3px;padding:1px 6px;font-size:11px;margin-left:4px;">{d["round"]}</span></p>
-<p style="margin:4px 0 0;font-size:12px;color:#636e72;">{d["industry"]} · {d["city"]} · {d["investors"]}</p>
-</section>"""
-        html += "</section>"
-
-    # --- 🏛 活跃投资机构 TOP15 ---
+    # --- 活跃投资机构 TOP15 ---
     html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
 <p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #667eea;padding-left:10px;margin:0 0 12px;">🏛 活跃投资机构 TOP15</p>"""
     mx_inv = investor_sorted[0][1] if investor_sorted else 1
@@ -559,7 +462,7 @@ def generate_wx_report(events_data, prev_events_data=None, trend_7day=None,
 </section>"""
     html += "</section>"
 
-    # --- 🏭 行业分布 TOP10 ---
+    # --- 行业分布 TOP10 ---
     html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
 <p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #00b894;padding-left:10px;margin:0 0 12px;">🏭 行业分布 TOP10</p>"""
     mx_ind = industry_sorted[0][1] if industry_sorted else 1
@@ -578,66 +481,7 @@ def generate_wx_report(events_data, prev_events_data=None, trend_7day=None,
 </section>"""
     html += "</section>"
 
-    # --- 🔄 融资轮次分布 ---
-    html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
-<p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #f39c12;padding-left:10px;margin:0 0 12px;">🔄 融资轮次分布</p>
-<table cellpadding="0" cellspacing="0" style="width:100%;">"""
-    round_colors = ["#e74c3c", "#e67e22", "#f1c40f", "#2ecc71", "#3498db", "#9b59b6", "#1abc9c", "#34495e", "#e91e63", "#ff9800"]
-    for i in range(0, min(len(round_sorted), 9), 3):
-        html += "<tr>"
-        for j in range(3):
-            if i + j < len(round_sorted):
-                name, cnt = round_sorted[i + j]
-                c = round_colors[(i + j) % len(round_colors)]
-                short = name[:6] + ".." if len(name) > 6 else name
-                html += f'<td style="padding:4px 6px;"><section style="background:{c}18;border:1px solid {c}50;border-radius:6px;padding:5px 10px;text-align:center;font-size:12px;"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:{c};margin-right:3px;"></span>{short} <strong>{cnt}</strong></section></td>'
-            else:
-                html += '<td></td>'
-        html += "</tr>"
-    html += "</table></section>"
-
-    # --- 💵 融资规模分布 ---
-    html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
-<p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #e67e22;padding-left:10px;margin:0 0 12px;">💵 融资规模分布</p>
-<table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-size:13px;">"""
-    scale_colors = {"1亿以上": "#e74c3c", "5000万-1亿": "#e67e22", "1000万-5000万": "#f1c40f", "1000万以下": "#3498db", "未披露": "#b2bec3"}
-    total_known = sum(v for k, v in amount_buckets.items() if k != "未披露")
-    for scale_name, scale_cnt in amount_buckets.items():
-        c = scale_colors.get(scale_name, "#999")
-        pct = int(scale_cnt / count * 100) if count > 0 else 0
-        bar_pct = int(scale_cnt / max(amount_buckets.values()) * 100) if max(amount_buckets.values()) > 0 else 0
-        html += f"""<tr>
-<td style="padding:6px 0;font-size:13px;color:#333;width:120px;">{scale_name}</td>
-<td style="padding:6px 4px;width:60%;">
-<table cellpadding="0" cellspacing="0" style="width:100%;"><tr>
-<td style="background:#f0f0f0;border-radius:4px;height:16px;width:100%;">
-<table cellpadding="0" cellspacing="0" style="width:{bar_pct}%;height:16px;border-radius:4px;background:{c};"><tr><td></td></tr></table>
-</td></tr></table>
-</td>
-<td style="padding:6px 8px;font-size:13px;text-align:right;width:60px;">{scale_cnt}起({pct}%)</td>
-</tr>"""
-    html += "</table></section>"
-
-    # --- 📍 地区分布 TOP10 ---
-    html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
-<p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #fd79a8;padding-left:10px;margin:0 0 12px;">📍 地区分布 TOP10</p>"""
-    mx_reg = region_sorted[0][1] if region_sorted else 1
-    for name, cnt in region_sorted:
-        short = name[:12] + "..." if len(name) > 12 else name
-        pct = max(int(cnt / mx_reg * 100), 8)
-        html += f"""<section style="margin-bottom:8px;">
-<table cellpadding="0" cellspacing="0" style="width:100%;"><tr>
-<td style="font-size:13px;color:#333;width:70%;">{short}</td>
-<td style="font-size:13px;color:#888;text-align:right;width:30%;">{cnt}起</td>
-</tr></table>
-<table cellpadding="0" cellspacing="0" style="width:100%;margin-top:3px;"><tr>
-<td style="background:#f0f0f0;border-radius:4px;height:18px;width:100%;">
-<table cellpadding="0" cellspacing="0" style="width:{pct}%;height:18px;border-radius:4px;background:#fd79a8;"><tr><td></td></tr></table>
-</td></tr></table>
-</section>"""
-    html += "</section>"
-
-    # --- 💰 投资类型分布 ---
+    # --- 投资类型分布 ---
     html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
 <p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #f5576c;padding-left:10px;margin:0 0 12px;">💰 投资类型分布</p>"""
     mx_type = type_sorted[0][1] if type_sorted else 1
@@ -656,53 +500,48 @@ def generate_wx_report(events_data, prev_events_data=None, trend_7day=None,
 </section>"""
     html += "</section>"
 
-    # --- 🔗 行业×轮次交叉分析 ---
-    if industry_round_cross:
-        # 取TOP5行业 × 轮次
-        top_industries = [k for k, v in industry_sorted[:5]]
-        top_rounds = [k for k, v in round_sorted[:5]]
-        cross_header = "".join([f'<td style="padding:6px 4px;font-size:11px;font-weight:bold;text-align:center;color:#fff;background:#533483;">{r[:5]}</td>' for r in top_rounds])
-        cross_rows = ""
-        for ind in top_industries:
-            cells = ""
-            for rnd in top_rounds:
-                val = industry_round_cross.get((ind[:6], rnd[:6]), 0)
-                bg = "#e8f5e9" if val > 0 else "#fafafa"
-                color = "#2e7d32" if val > 0 else "#ccc"
-                cells += f'<td style="padding:6px 4px;font-size:12px;text-align:center;background:{bg};color:{color};">{val if val > 0 else "-"}</td>'
-            cross_rows += f'<tr><td style="padding:6px 4px;font-size:11px;font-weight:bold;color:#333;background:#f8f9fa;">{ind[:8]}</td>{cells}</tr>'
-
-        html += f"""<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
-<p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #533483;padding-left:10px;margin:0 0 12px;">🔗 行业×轮次交叉分析</p>
-<table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;border:1px solid #eee;">
-<tr style="background:#533483;color:#fff;"><td style="padding:6px 4px;font-size:11px;font-weight:bold;color:#fff;"></td>{cross_header}</tr>
-{cross_rows}
-</table>
+    # --- 地区分布 TOP10 ---
+    html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
+<p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #fd79a8;padding-left:10px;margin:0 0 12px;">📍 地区分布 TOP10</p>"""
+    mx_reg = region_sorted[0][1] if region_sorted else 1
+    for name, cnt in region_sorted:
+        short = name[:12] + "..." if len(name) > 12 else name
+        pct = max(int(cnt / mx_reg * 100), 8)
+        html += f"""<section style="margin-bottom:8px;">
+<table cellpadding="0" cellspacing="0" style="width:100%;"><tr>
+<td style="font-size:13px;color:#333;width:70%;">{short}</td>
+<td style="font-size:13px;color:#888;text-align:right;width:30%;">{cnt}起</td>
+</tr></table>
+<table cellpadding="0" cellspacing="0" style="width:100%;margin-top:3px;"><tr>
+<td style="background:#f0f0f0;border-radius:4px;height:18px;width:100%;">
+<table cellpadding="0" cellspacing="0" style="width:{pct}%;height:18px;border-radius:4px;background:#fd79a8;"><tr><td></td></tr></table>
+</td></tr></table>
 </section>"""
+    html += "</section>"
 
-    # --- 🏦 新设基金动态 ---
+    # --- 新设基金动态 ---
     if fund_rows:
         html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
 <p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #2ecc71;padding-left:10px;margin:0 0 12px;">🏦 近期新设基金</p>
 <table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-size:12px;">
 <tr style="background:#f8f9fa;">
 <td style="padding:6px 8px;font-weight:bold;color:#666;">基金名称</td>
-<td style="padding:6px 8px;font-weight:bold;color:#666;">管理人</td>
-<td style="padding:6px 8px;font-weight:bold;color:#666;text-align:center;">目标规模</td>
+<td style="padding:6px 8px;font-weight:bold;color:#666;">所属机构</td>
+<td style="padding:6px 8px;font-weight:bold;color:#666;text-align:center;">管理规模</td>
 </tr>"""
         for i, fund in enumerate(fund_rows[:10]):
             bg = "#fafafa" if i % 2 == 0 else "#fff"
             fname = safe_get(fund, "fund_name", default="-")[:16]
-            gp = safe_get(fund, "fund_com_entity_gs_name", default="-")[:12]
+            inv_name = safe_get(fund, "investor_name", default="-")[:12]
             target = format_amount(safe_get(fund, "target_size", default="-"))
             html += f"""<tr style="background:{bg};">
 <td style="padding:6px 8px;">{fname}</td>
-<td style="padding:6px 8px;color:#666;">{gp}</td>
+<td style="padding:6px 8px;color:#666;">{inv_name}</td>
 <td style="padding:6px 8px;text-align:center;color:#2ecc71;font-weight:bold;">{target}</td>
 </tr>"""
         html += "</table></section>"
 
-    # --- 💎 LP出资动态 ---
+    # --- LP出资动态 ---
     if lp_rows:
         html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
 <p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #9b59b6;padding-left:10px;margin:0 0 12px;">💎 LP出资动态</p>
@@ -724,41 +563,39 @@ def generate_wx_report(events_data, prev_events_data=None, trend_7day=None,
 </tr>"""
         html += "</table></section>"
 
-    # --- 🏢 获投企业列表 ---
+    # --- 获投企业列表 ---
     html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
 <p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #4ECDC4;padding-left:10px;margin:0 0 12px;">🏢 获投企业列表</p>
 <table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-size:13px;">
 <tr style="background:#1a1a2e;color:#fff;">
 <td style="padding:8px;text-align:center;font-size:12px;width:30px;">#</td>
 <td style="padding:8px;font-size:12px;">企业</td>
-<td style="padding:8px;text-align:center;font-size:12px;width:60px;">金额</td>
 <td style="padding:8px;text-align:center;font-size:12px;width:50px;">投资方</td>
 </tr>"""
     for i, (cn, info) in enumerate(sorted(company_investors.items(), key=lambda x: len(x[1]["investors"]), reverse=True), 1):
-        amt_display = format_amount(info["amount"])
         ivs = info["investors"]
         bg = "#fafafa" if i % 2 == 0 else "#fff"
+        inv_names = "、".join([v["investor"][:8] for v in ivs[:3]])
+        if len(ivs) > 3:
+            inv_names += f"等{len(ivs)}家"
         html += f"""<tr style="background:{bg};">
 <td style="padding:8px;text-align:center;color:#999;font-size:12px;">{i}</td>
-<td style="padding:8px;font-size:13px;"><strong>{cn}</strong><br/><span style="font-size:11px;color:#999;">{info["industry"]} · {info["round"]}</span></td>
-<td style="padding:8px;text-align:center;color:#e74c3c;font-weight:bold;font-size:13px;">{amt_display}</td>
+<td style="padding:8px;font-size:13px;"><strong>{cn}</strong><br/><span style="font-size:11px;color:#999;">{info["industry"]} · {inv_names}</span></td>
 <td style="padding:8px;text-align:center;font-size:12px;">{len(ivs)}家</td>
 </tr>"""
     html += "</table></section>"
 
     # --- 底部 ---
-    html += f"""<section style="padding:15px;text-align:center;color:#b2bec3;font-size:11px;border-top:1px solid #eee;margin-top:12px;">
+    html += """<section style="padding:15px;text-align:center;color:#b2bec3;font-size:11px;border-top:1px solid #eee;margin-top:12px;">
 <p style="margin:0;">数据来源：烯牛创投数据 | 报告由 AI 自动生成</p>
 <p style="margin:4px 0 0;">仅供参考，不构成投资建议</p>
 </section>
-
 </section>"""
 
     return html
 
 
 def generate_full_page(wx_content, date_str):
-    """生成完整HTML页面，包含一键复制按钮"""
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -778,22 +615,13 @@ body {{ margin:0; padding:20px; background:#f0f2f5; font-family:sans-serif; }}
 </style>
 </head>
 <body>
-
 <div class="toolbar">
     <h1>📊 {date_str} 投融资日报</h1>
-    <div>
-        <button class="btn btn-copy" onclick="copyForWechat()">📋 一键复制到公众号</button>
-    </div>
+    <button class="btn btn-copy" onclick="copyForWechat()">📋 一键复制到公众号</button>
 </div>
-
 <p class="hint">↓ 下方是公众号预览效果，点击上方按钮复制后直接粘贴到公众号编辑器</p>
-
-<div class="preview" id="wx-content">
-{wx_content}
-</div>
-
+<div class="preview" id="wx-content">{wx_content}</div>
 <div id="toast" class="toast"></div>
-
 <script>
 function copyForWechat() {{
     const el = document.getElementById('wx-content');
@@ -804,27 +632,17 @@ function copyForWechat() {{
     sel.addRange(range);
     try {{
         const ok = document.execCommand('copy');
-        if (ok) {{
-            showToast('✅ 已复制！直接粘贴到公众号编辑器即可');
-        }} else {{
-            showToast('⚠️ 复制失败，请手动选中内容复制');
-        }}
-    }} catch(e) {{
-        showToast('⚠️ 复制失败，请手动选中内容复制');
-    }}
+        showToast(ok ? '✅ 已复制！直接粘贴到公众号编辑器即可' : '⚠️ 复制失败，请手动选中内容复制');
+    }} catch(e) {{ showToast('⚠️ 复制失败，请手动选中内容复制'); }}
     sel.removeAllRanges();
 }}
-
 function showToast(msg) {{
     const t = document.getElementById('toast');
-    t.innerText = msg;
-    t.style.display = 'block';
+    t.innerText = msg; t.style.display = 'block';
     setTimeout(() => {{ t.style.display = 'none'; }}, 2500);
 }}
 </script>
-
-</body>
-</html>"""
+</body></html>"""
 
 
 # ============ 邮件发送 ============
@@ -862,42 +680,40 @@ def main():
     print(f"  MCP: {'OK' if init_result else 'FAIL'}")
 
     # 1. 昨日投融资事件
-    events_data = get_yesterday_events(client)
-    ev_rows, ev_count = parse_rows(events_data)
-    print(f"  昨日事件: {ev_count}条")
+    rows, count = get_yesterday_events(client)
+    print(f"  昨日事件: {count}条")
 
-    # 2. 前日数据（趋势对比）
-    prev_events_data = get_previous_day_events(client)
-    prev_rows, prev_count = parse_rows(prev_events_data)
+    # 2. 前日数据
+    prev_rows, prev_count = get_previous_day_events(client)
+    prev_investor_count = len(set(safe_get(e, "fund_com_entity_gs_name", default="x") for e in prev_rows)) if prev_rows else 0
+    prev_company_count = len(set(safe_get(e, "project_name", "company_gs_name", default="x") for e in prev_rows)) if prev_rows else 0
     print(f"  前日事件: {prev_count}条")
 
-    # 3. 7天趋势数据
-    trend_7day = get_7day_events(client)
-    t_rows, t_count = parse_rows(trend_7day)
-    print(f"  7天数据: {t_count}条")
+    # 3. 7天趋势
+    trend_rows, _ = get_7day_trend(client)
+    print(f"  7天数据: {len(trend_rows)}条")
 
     # 昨日无数据则扩大范围
-    if not events_data or (isinstance(events_data, dict) and events_data.get("count", 0) == 0):
-        print("  昨日无数据，获取最近3天...")
-        events_data = get_recent_events(client, days=3)
+    if count == 0:
+        print("  昨日无数据，获取最近7天...")
+        rows, count = get_recent_events(client, days=7)
+        print(f"  7天回退: {count}条")
 
     # 4. 新设基金
-    funds_data = get_new_funds(client, days=7)
-    f_rows, f_count = parse_rows(funds_data)
-    print(f"  新设基金: {f_count}条")
+    fund_rows, fund_count = get_new_funds(client, days=7)
+    print(f"  新设基金: {fund_count}条")
 
     # 5. LP出资
-    lp_data = get_lp_events(client, days=7)
-    l_rows, l_count = parse_rows(lp_data)
-    print(f"  LP出资: {l_count}条")
+    lp_rows, lp_count = get_lp_events(client, days=7)
+    print(f"  LP出资: {lp_count}条")
 
     yesterday = datetime.date.today() - datetime.timedelta(days=1)
     date_str = yesterday.strftime("%Y年%m月%d日")
 
     # 生成报告
     wx_content = generate_wx_report(
-        events_data, prev_events_data, trend_7day,
-        funds_data, lp_data, date_str
+        rows, count, prev_count, prev_investor_count, prev_company_count,
+        trend_rows, fund_rows, lp_rows, date_str
     )
     full_html = generate_full_page(wx_content, date_str)
 
@@ -905,8 +721,6 @@ def main():
     output_dir = os.environ.get("GITHUB_OUTPUT_DIR", "")
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-        with open(os.path.join(output_dir, f"wx_report_{yesterday.strftime('%Y%m%d')}.html"), "w", encoding="utf-8") as f:
-            f.write(wx_content)
         with open(os.path.join(output_dir, f"report_{yesterday.strftime('%Y%m%d')}.html"), "w", encoding="utf-8") as f:
             f.write(full_html)
         print(f"  报告已保存至 {output_dir}")
