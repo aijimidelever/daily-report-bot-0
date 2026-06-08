@@ -19,6 +19,9 @@ import urllib.error
 
 # ============ 配置 ============
 XINIU_API_KEY = os.environ.get("XINIU_API_KEY", "")
+if not XINIU_API_KEY:
+    print("[ERROR] XINIU_API_KEY 环境变量未设置！", file=sys.stderr)
+    sys.exit(1)
 XINIU_MCP_URL = f"http://vip.xiniudata.com/mcp?api_key={XINIU_API_KEY}"
 
 SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.qq.com")
@@ -69,10 +72,13 @@ class XiniuMCPClient:
             return None
 
     def initialize(self):
-        return self._call("initialize", {
+        result = self._call("initialize", {
             "protocolVersion": "2024-11-05", "capabilities": {},
             "clientInfo": {"name": "daily-report-bot", "version": "6.0.0"}
         })
+        if result:
+            self._call("notifications/initialized", {})
+        return result
 
     def call_tool(self, tool_name, arguments):
         return self._call("tools/call", {"name": tool_name, "arguments": arguments})
@@ -83,18 +89,21 @@ class XiniuMCPClient:
             content = result.get("content", [])
             if content:
                 text = content[0].get("text", "")
+                if text.startswith("Error") or "余额不足" in text or "配额" in text or "不可调用" in text:
+                    print(f"[MCP API Error] {text}", file=sys.stderr)
+                    return None
                 try:
                     return json.loads(text)
                 except json.JSONDecodeError:
-                    return {"rows": [], "count": 0, "raw": text}
+                    print(f"[MCP Parse Error] 非JSON响应: {text[:300]}", file=sys.stderr)
+                    return None
         return None
 
-# ============ 数据表 & 字段（真实字段名）============
+# ============ 数据表 & 字段 ============
 INVEST_TABLE = "entity_invest_event.e_investor_entity_invest_firm"
 FUND_TABLE = "entity_investor.e_fund"
 LP_TABLE = "ai_chat.v_lp_invest_fund"
 
-# 投融资事件 - 查询字段
 INVEST_QUERY_COLUMNS = [
     "company_gs_name", "project_name", "invest_date",
     "fund_com_entity_gs_name", "share_percent", "fund_type_desc",
@@ -103,7 +112,6 @@ INVEST_QUERY_COLUMNS = [
     "company_brief_intro"
 ]
 
-# 投融资事件 - 返回数据中文key映射
 KEY_MAP = {
     "被投公司工商名称": "company_gs_name",
     "被投公司项目名称": "project_name",
@@ -123,7 +131,6 @@ BASIC_QUERY_COLUMNS = [
     "fund_com_entity_gs_name", "share_percent", "fund_type_desc"
 ]
 
-# 基金表字段
 FUND_QUERY_COLUMNS = [
     "firm_name", "investor_name", "fund_establish_date",
     "register_capital", "amac_status", "money_type",
@@ -144,7 +151,6 @@ FUND_KEY_MAP = {
     "经营状态": "status",
 }
 
-# LP表字段
 LP_QUERY_COLUMNS = [
     "lp_name", "fund_name", "invest_date",
     "lp_invest_amount", "lp_type_select", "lp_type_main",
@@ -192,7 +198,6 @@ def get_invest_events(client, start_date, end_date, columns=None, limit=200):
     return rows, data.get("count", 0)
 
 def get_last_week_range():
-    """获取上周一和上周日的日期"""
     today = datetime.date.today()
     this_monday = today - datetime.timedelta(days=today.weekday())
     last_monday = this_monday - datetime.timedelta(days=7)
@@ -200,24 +205,20 @@ def get_last_week_range():
     return last_monday, last_sunday
 
 def get_previous_week_range():
-    """获取上上周一和上上周日的日期"""
     last_monday, last_sunday = get_last_week_range()
     prev_monday = last_monday - datetime.timedelta(days=7)
     prev_sunday = last_monday - datetime.timedelta(days=1)
     return prev_monday, prev_sunday
 
 def get_last_week_events(client, columns=None, limit=500):
-    """获取上周一~上周日的投融资事件"""
     last_monday, last_sunday = get_last_week_range()
     return get_invest_events(client, last_monday, last_sunday, columns=columns, limit=limit)
 
 def get_previous_week_events(client, columns=None, limit=500):
-    """获取上上周的投融资事件（用于同比）"""
     prev_monday, prev_sunday = get_previous_week_range()
     return get_invest_events(client, prev_monday, prev_sunday, columns=columns, limit=limit)
 
 def get_4week_trend(client):
-    """获取近4周趋势数据"""
     last_monday, last_sunday = get_last_week_range()
     start_date = last_monday - datetime.timedelta(days=21)
     return get_invest_events(client, start_date, last_sunday, columns=[
@@ -225,7 +226,6 @@ def get_4week_trend(client):
     ], limit=2000)
 
 def get_recent_funds(client):
-    """获取上周新设基金"""
     last_monday, last_sunday = get_last_week_range()
     data = client.get_data(req_params=[{
         "table": FUND_TABLE,
@@ -238,7 +238,6 @@ def get_recent_funds(client):
     return rows, data.get("count", 0)
 
 def get_recent_lp_events(client):
-    """获取上周LP出资事件"""
     last_monday, last_sunday = get_last_week_range()
     data = client.get_data(req_params=[{
         "table": LP_TABLE,
@@ -290,7 +289,6 @@ def trend_text(current, previous):
 
 # ============ 周趋势分析 ============
 def analyze_weekly_trend(rows):
-    """按日汇总投融资事件趋势"""
     daily = {}
     for event in rows:
         date_str = safe_get(event, "invest_date", default="")
@@ -342,7 +340,6 @@ def generate_wx_report(rows, count, prev_count, prev_investor_count, prev_compan
     if date_str is None:
         last_monday, last_sunday = get_last_week_range()
         date_str = f"{last_monday.strftime('%m月%d日')} - {last_sunday.strftime('%m月%d日')}"
-        date_range_str = f"{last_monday.strftime('%Y年%m月%d日')}—{last_sunday.strftime('%Y年%m月%d日')}"
 
     if not rows:
         return f"""<section style="padding:20px;text-align:center;">
@@ -351,7 +348,6 @@ def generate_wx_report(rows, count, prev_count, prev_investor_count, prev_compan
 <p style="font-size:14px;color:#999;padding:30px 0;">上周暂无融资事件数据</p>
 </section>"""
 
-    # ---- 统计 ----
     investor_dist, type_dist, industry_dist, region_dist = {}, {}, {}, {}
     company_investors = {}
 
@@ -389,23 +385,18 @@ def generate_wx_report(rows, count, prev_count, prev_investor_count, prev_compan
     t_companies = trend_text(len(company_investors), prev_company_count)
     t_investors = trend_text(len(investor_dist), prev_investor_count)
 
-    # 周趋势
     trend_analysis = analyze_weekly_trend(trend_data) if trend_data else []
 
-    # 市场观察
     market_obs = generate_market_observation(
         count, len(company_investors), len(investor_dist),
         industry_sorted, type_sorted, region_sorted, trend_analysis
     )
 
-    # ========= 公众号 HTML =========
     html = f"""<section style="max-width:677px;margin:0 auto;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif;color:#333;line-height:1.8;font-size:15px;">
-
 <section style="background:#1a1a2e;color:#fff;text-align:center;padding:30px 15px;border-radius:8px 8px 0 0;">
 <p style="font-size:22px;font-weight:bold;margin:0;letter-spacing:2px;">📊 投融资周报</p>
 <p style="font-size:13px;margin:8px 0 0;color:rgba(255,255,255,0.7);">{date_str}</p>
 </section>
-
 <section style="background:#fff;border:1px solid #eee;border-top:none;">
 <table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;">
 <tr>
@@ -428,13 +419,11 @@ def generate_wx_report(rows, count, prev_count, prev_investor_count, prev_compan
 </table>
 </section>"""
 
-    # --- 市场观察 ---
     html += f"""<section style="padding:16px 15px;background:#f8f9ff;border:1px solid #e8ecff;border-top:none;margin-top:2px;">
 <p style="font-size:15px;font-weight:bold;color:#1a1a2e;margin:0 0 8px;">📝 市场观察</p>
 <p style="font-size:14px;color:#444;margin:0;line-height:1.9;">{market_obs}</p>
 </section>"""
 
-    # --- 上周每日趋势 ---
     if len(trend_analysis) >= 2:
         html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
 <p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #667eea;padding-left:10px;margin:0 0 12px;">📈 上周每日融资趋势</p>
@@ -456,7 +445,6 @@ def generate_wx_report(rows, count, prev_count, prev_investor_count, prev_compan
 </tr>"""
         html += "</table></section>"
 
-    # --- 活跃投资机构 TOP15 ---
     html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
 <p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #667eea;padding-left:10px;margin:0 0 12px;">🏛 活跃投资机构 TOP15</p>"""
     mx_inv = investor_sorted[0][1] if investor_sorted else 1
@@ -475,7 +463,6 @@ def generate_wx_report(rows, count, prev_count, prev_investor_count, prev_compan
 </section>"""
     html += "</section>"
 
-    # --- 行业分布 TOP10 ---
     html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
 <p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #00b894;padding-left:10px;margin:0 0 12px;">🏭 行业分布 TOP10</p>"""
     mx_ind = industry_sorted[0][1] if industry_sorted else 1
@@ -494,7 +481,6 @@ def generate_wx_report(rows, count, prev_count, prev_investor_count, prev_compan
 </section>"""
     html += "</section>"
 
-    # --- 投资类型分布 ---
     html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
 <p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #f5576c;padding-left:10px;margin:0 0 12px;">💰 投资类型分布</p>"""
     mx_type = type_sorted[0][1] if type_sorted else 1
@@ -513,7 +499,6 @@ def generate_wx_report(rows, count, prev_count, prev_investor_count, prev_compan
 </section>"""
     html += "</section>"
 
-    # --- 地区分布 TOP10 ---
     html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
 <p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #fd79a8;padding-left:10px;margin:0 0 12px;">📍 地区分布 TOP10</p>"""
     mx_reg = region_sorted[0][1] if region_sorted else 1
@@ -532,7 +517,6 @@ def generate_wx_report(rows, count, prev_count, prev_investor_count, prev_compan
 </section>"""
     html += "</section>"
 
-    # --- 新设基金动态 ---
     if fund_rows:
         html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
 <p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #2ecc71;padding-left:10px;margin:0 0 12px;">🏦 上周新设基金</p>
@@ -554,7 +538,6 @@ def generate_wx_report(rows, count, prev_count, prev_investor_count, prev_compan
 </tr>"""
         html += "</table></section>"
 
-    # --- LP出资动态 ---
     if lp_rows:
         html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
 <p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #9b59b6;padding-left:10px;margin:0 0 12px;">💎 上周LP出资动态</p>
@@ -576,7 +559,6 @@ def generate_wx_report(rows, count, prev_count, prev_investor_count, prev_compan
 </tr>"""
         html += "</table></section>"
 
-    # --- 获投企业列表 ---
     html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
 <p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #4ECDC4;padding-left:10px;margin:0 0 12px;">🏢 获投企业列表</p>
 <table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-size:13px;">
@@ -598,7 +580,6 @@ def generate_wx_report(rows, count, prev_count, prev_investor_count, prev_compan
 </tr>"""
     html += "</table></section>"
 
-    # --- 底部 ---
     html += """<section style="padding:15px;text-align:center;color:#b2bec3;font-size:11px;border-top:1px solid #eee;margin-top:12px;">
 <p style="margin:0;">数据来源：烯牛创投数据 | 报告由 AI 自动生成</p>
 <p style="margin:4px 0 0;">仅供参考，不构成投资建议</p>
@@ -697,39 +678,31 @@ def main():
     print(f"  报告区间: {last_monday} ~ {last_sunday}")
     print(f"  对比区间: {prev_monday} ~ {prev_sunday}")
 
-    # 1. 上周投融资事件
     rows, count = get_last_week_events(client)
     print(f"  上周事件: {count}条")
 
-    # 2. 上上周数据（用于同比）
     prev_rows, prev_count = get_previous_week_events(client, columns=BASIC_QUERY_COLUMNS)
     prev_investor_count = len(set(safe_get(e, "fund_com_entity_gs_name", default="x") for e in prev_rows)) if prev_rows else 0
     prev_company_count = len(set(safe_get(e, "project_name", "company_gs_name", default="x") for e in prev_rows)) if prev_rows else 0
     print(f"  上上周事件: {prev_count}条")
 
-    # 3. 近4周趋势
     trend_rows, _ = get_4week_trend(client)
     print(f"  近4周数据: {len(trend_rows)}条")
 
-    # 4. 上周新设基金
     fund_rows, fund_count = get_recent_funds(client)
     print(f"  上周新设基金: {fund_count}条")
 
-    # 5. 上周LP出资
     lp_rows, lp_count = get_recent_lp_events(client)
     print(f"  上周LP出资: {lp_count}条")
 
     date_str = f"{last_monday.strftime('%m月%d日')} - {last_sunday.strftime('%m月%d日')}"
-    date_range_str = f"{last_monday.strftime('%Y年%m月%d日')}—{last_sunday.strftime('%Y年%m月%d日')}"
 
-    # 生成报告
     wx_content = generate_wx_report(
         rows, count, prev_count, prev_investor_count, prev_company_count,
-        trend_rows, fund_rows, lp_rows, date_str, date_range_str
+        trend_rows, fund_rows, lp_rows, date_str
     )
     full_html = generate_full_page(wx_content, date_str)
 
-    # 保存文件
     output_dir = os.environ.get("GITHUB_OUTPUT_DIR", "")
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
