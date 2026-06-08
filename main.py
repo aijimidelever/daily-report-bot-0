@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-每日投融资日报 - 公众号兼容版 V5
+投融资周报 - 公众号兼容版 V6
 基于烯牛数据真实字段名重写
 数据来源：烯牛创投数据 MCP API
+每周一自动生成上周投融资汇总
 """
 import json
 import os
@@ -70,7 +71,7 @@ class XiniuMCPClient:
     def initialize(self):
         return self._call("initialize", {
             "protocolVersion": "2024-11-05", "capabilities": {},
-            "clientInfo": {"name": "daily-report-bot", "version": "5.0.0"}
+            "clientInfo": {"name": "daily-report-bot", "version": "6.0.0"}
         })
 
     def call_tool(self, tool_name, arguments):
@@ -93,7 +94,7 @@ INVEST_TABLE = "entity_invest_event.e_investor_entity_invest_firm"
 FUND_TABLE = "entity_investor.e_fund"
 LP_TABLE = "ai_chat.v_lp_invest_fund"
 
-# 投融资事件 - 查询字段（英文key是查询用的）
+# 投融资事件 - 查询字段
 INVEST_QUERY_COLUMNS = [
     "company_gs_name", "project_name", "invest_date",
     "fund_com_entity_gs_name", "share_percent", "fund_type_desc",
@@ -130,7 +131,6 @@ FUND_QUERY_COLUMNS = [
     "xiniu_fund_type_select", "status"
 ]
 
-# 基金表中文key映射
 FUND_KEY_MAP = {
     "基金名称": "fund_name",
     "所属机构": "investor_name",
@@ -164,7 +164,6 @@ LP_KEY_MAP = {
 
 # ============ 数据规范化 ============
 def normalize_row(row, key_map):
-    """将中文key的行数据转为英文key"""
     result = {}
     for cn_key, en_key in key_map.items():
         if cn_key in row:
@@ -174,7 +173,6 @@ def normalize_row(row, key_map):
     return result
 
 def normalize_rows(rows, key_map):
-    """批量规范化行数据"""
     return [normalize_row(row, key_map) for row in rows]
 
 # ============ 数据获取 ============
@@ -193,47 +191,59 @@ def get_invest_events(client, start_date, end_date, columns=None, limit=200):
     rows = normalize_rows(data.get("rows", []), KEY_MAP)
     return rows, data.get("count", 0)
 
-def get_yesterday_events(client):
-    yesterday = datetime.date.today() - datetime.timedelta(days=1)
-    return get_invest_events(client, yesterday, yesterday)
+def get_last_week_range():
+    """获取上周一和上周日的日期"""
+    today = datetime.date.today()
+    this_monday = today - datetime.timedelta(days=today.weekday())
+    last_monday = this_monday - datetime.timedelta(days=7)
+    last_sunday = this_monday - datetime.timedelta(days=1)
+    return last_monday, last_sunday
 
-def get_recent_events(client, days=7):
-    yesterday = datetime.date.today() - datetime.timedelta(days=1)
-    start_date = yesterday - datetime.timedelta(days=days)
-    return get_invest_events(client, start_date, yesterday)
+def get_previous_week_range():
+    """获取上上周一和上上周日的日期"""
+    last_monday, last_sunday = get_last_week_range()
+    prev_monday = last_monday - datetime.timedelta(days=7)
+    prev_sunday = last_monday - datetime.timedelta(days=1)
+    return prev_monday, prev_sunday
 
-def get_previous_day_events(client):
-    day_before = datetime.date.today() - datetime.timedelta(days=2)
-    return get_invest_events(client, day_before, day_before, columns=BASIC_QUERY_COLUMNS)
+def get_last_week_events(client, columns=None, limit=500):
+    """获取上周一~上周日的投融资事件"""
+    last_monday, last_sunday = get_last_week_range()
+    return get_invest_events(client, last_monday, last_sunday, columns=columns, limit=limit)
 
-def get_7day_trend(client):
-    """获取7天趋势数据"""
-    yesterday = datetime.date.today() - datetime.timedelta(days=1)
-    start_date = yesterday - datetime.timedelta(days=6)
-    return get_invest_events(client, start_date, yesterday, columns=[
+def get_previous_week_events(client, columns=None, limit=500):
+    """获取上上周的投融资事件（用于同比）"""
+    prev_monday, prev_sunday = get_previous_week_range()
+    return get_invest_events(client, prev_monday, prev_sunday, columns=columns, limit=limit)
+
+def get_4week_trend(client):
+    """获取近4周趋势数据"""
+    last_monday, last_sunday = get_last_week_range()
+    start_date = last_monday - datetime.timedelta(days=21)
+    return get_invest_events(client, start_date, last_sunday, columns=[
         "invest_date", "company_gs_name", "fund_com_entity_gs_name"
-    ], limit=500)
+    ], limit=2000)
 
-def get_new_funds(client, days=7):
-    yesterday = datetime.date.today() - datetime.timedelta(days=1)
-    start_date = yesterday - datetime.timedelta(days=days)
+def get_recent_funds(client):
+    """获取上周新设基金"""
+    last_monday, last_sunday = get_last_week_range()
     data = client.get_data(req_params=[{
         "table": FUND_TABLE,
         "selected_columns": FUND_QUERY_COLUMNS,
-        "filters": [{"field": "fund_establish_date", "type": "range", "value": _date_range(start_date, yesterday)}]
+        "filters": [{"field": "fund_establish_date", "type": "range", "value": _date_range(last_monday, last_sunday)}]
     }], limit=50)
     if not data or not isinstance(data, dict):
         return [], 0
     rows = normalize_rows(data.get("rows", []), FUND_KEY_MAP)
     return rows, data.get("count", 0)
 
-def get_lp_events(client, days=7):
-    yesterday = datetime.date.today() - datetime.timedelta(days=1)
-    start_date = yesterday - datetime.timedelta(days=days)
+def get_recent_lp_events(client):
+    """获取上周LP出资事件"""
+    last_monday, last_sunday = get_last_week_range()
     data = client.get_data(req_params=[{
         "table": LP_TABLE,
         "selected_columns": LP_QUERY_COLUMNS,
-        "filters": [{"field": "invest_date", "type": "range", "value": _date_range(start_date, yesterday)}]
+        "filters": [{"field": "invest_date", "type": "range", "value": _date_range(last_monday, last_sunday)}]
     }], limit=50)
     if not data or not isinstance(data, dict):
         return [], 0
@@ -254,9 +264,9 @@ def format_amount(amount_str):
         return "未披露"
     try:
         val = float(str(amount_str).replace(",", ""))
-        if val >= 100000000:  # 元转亿
+        if val >= 100000000:
             return f"{val/100000000:.1f}亿"
-        elif val >= 10000:  # 元转万
+        elif val >= 10000:
             return f"{val/10000:.0f}万"
         elif val >= 1:
             return f"{val:.0f}元"
@@ -278,8 +288,9 @@ def trend_text(current, previous):
     else:
         return "→持平"
 
-# ============ 7天趋势分析 ============
-def analyze_7day_trend(rows):
+# ============ 周趋势分析 ============
+def analyze_weekly_trend(rows):
+    """按日汇总投融资事件趋势"""
     daily = {}
     for event in rows:
         date_str = safe_get(event, "invest_date", default="")
@@ -327,15 +338,17 @@ def generate_market_observation(count, company_count, investor_count, industry_s
 
 # ============ 公众号报告生成 ============
 def generate_wx_report(rows, count, prev_count, prev_investor_count, prev_company_count,
-                       trend_data, fund_rows, lp_rows, date_str=None):
+                       trend_data, fund_rows, lp_rows, date_str=None, date_range_str=None):
     if date_str is None:
-        date_str = (datetime.date.today() - datetime.timedelta(days=1)).strftime("%Y年%m月%d日")
+        last_monday, last_sunday = get_last_week_range()
+        date_str = f"{last_monday.strftime('%m月%d日')} - {last_sunday.strftime('%m月%d日')}"
+        date_range_str = f"{last_monday.strftime('%Y年%m月%d日')}—{last_sunday.strftime('%Y年%m月%d日')}"
 
     if not rows:
         return f"""<section style="padding:20px;text-align:center;">
-<p style="font-size:20px;font-weight:bold;color:#1a1a2e;">📊 投融资日报</p>
+<p style="font-size:20px;font-weight:bold;color:#1a1a2e;">📊 投融资周报</p>
 <p style="font-size:14px;color:#666;">{date_str}</p>
-<p style="font-size:14px;color:#999;padding:30px 0;">昨日暂无融资事件数据</p>
+<p style="font-size:14px;color:#999;padding:30px 0;">上周暂无融资事件数据</p>
 </section>"""
 
     # ---- 统计 ----
@@ -376,8 +389,8 @@ def generate_wx_report(rows, count, prev_count, prev_investor_count, prev_compan
     t_companies = trend_text(len(company_investors), prev_company_count)
     t_investors = trend_text(len(investor_dist), prev_investor_count)
 
-    # 7天趋势
-    trend_analysis = analyze_7day_trend(trend_data) if trend_data else []
+    # 周趋势
+    trend_analysis = analyze_weekly_trend(trend_data) if trend_data else []
 
     # 市场观察
     market_obs = generate_market_observation(
@@ -389,7 +402,7 @@ def generate_wx_report(rows, count, prev_count, prev_investor_count, prev_compan
     html = f"""<section style="max-width:677px;margin:0 auto;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif;color:#333;line-height:1.8;font-size:15px;">
 
 <section style="background:#1a1a2e;color:#fff;text-align:center;padding:30px 15px;border-radius:8px 8px 0 0;">
-<p style="font-size:22px;font-weight:bold;margin:0;letter-spacing:2px;">📊 投融资日报</p>
+<p style="font-size:22px;font-weight:bold;margin:0;letter-spacing:2px;">📊 投融资周报</p>
 <p style="font-size:13px;margin:8px 0 0;color:rgba(255,255,255,0.7);">{date_str}</p>
 </section>
 
@@ -421,10 +434,10 @@ def generate_wx_report(rows, count, prev_count, prev_investor_count, prev_compan
 <p style="font-size:14px;color:#444;margin:0;line-height:1.9;">{market_obs}</p>
 </section>"""
 
-    # --- 7天趋势 ---
-    if len(trend_analysis) >= 3:
+    # --- 上周每日趋势 ---
+    if len(trend_analysis) >= 2:
         html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
-<p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #667eea;padding-left:10px;margin:0 0 12px;">📈 近7日融资趋势</p>
+<p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #667eea;padding-left:10px;margin:0 0 12px;">📈 上周每日融资趋势</p>
 <table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-size:12px;">
 <tr style="background:#f8f9fa;">
 <td style="padding:6px 8px;font-weight:bold;color:#666;">日期</td>
@@ -522,7 +535,7 @@ def generate_wx_report(rows, count, prev_count, prev_investor_count, prev_compan
     # --- 新设基金动态 ---
     if fund_rows:
         html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
-<p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #2ecc71;padding-left:10px;margin:0 0 12px;">🏦 近期新设基金</p>
+<p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #2ecc71;padding-left:10px;margin:0 0 12px;">🏦 上周新设基金</p>
 <table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-size:12px;">
 <tr style="background:#f8f9fa;">
 <td style="padding:6px 8px;font-weight:bold;color:#666;">基金名称</td>
@@ -544,7 +557,7 @@ def generate_wx_report(rows, count, prev_count, prev_investor_count, prev_compan
     # --- LP出资动态 ---
     if lp_rows:
         html += """<section style="padding:20px 15px;background:#fff;border:1px solid #eee;border-top:none;margin-top:12px;">
-<p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #9b59b6;padding-left:10px;margin:0 0 12px;">💎 LP出资动态</p>
+<p style="font-size:16px;font-weight:bold;color:#1a1a2e;border-left:4px solid #9b59b6;padding-left:10px;margin:0 0 12px;">💎 上周LP出资动态</p>
 <table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-size:12px;">
 <tr style="background:#f8f9fa;">
 <td style="padding:6px 8px;font-weight:bold;color:#666;">LP</td>
@@ -601,7 +614,7 @@ def generate_full_page(wx_content, date_str):
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>投融资日报 | {date_str} - 公众号版</title>
+<title>投融资周报 | {date_str} - 公众号版</title>
 <style>
 body {{ margin:0; padding:20px; background:#f0f2f5; font-family:sans-serif; }}
 .toolbar {{ position:sticky; top:0; z-index:100; background:#fff; padding:15px 20px; box-shadow:0 2px 8px rgba(0,0,0,0.1); display:flex; align-items:center; justify-content:space-between; }}
@@ -616,7 +629,7 @@ body {{ margin:0; padding:20px; background:#f0f2f5; font-family:sans-serif; }}
 </head>
 <body>
 <div class="toolbar">
-    <h1>📊 {date_str} 投融资日报</h1>
+    <h1>📊 {date_str} 投融资周报</h1>
     <button class="btn btn-copy" onclick="copyForWechat()">📋 一键复制到公众号</button>
 </div>
 <p class="hint">↓ 下方是公众号预览效果，点击上方按钮复制后直接粘贴到公众号编辑器</p>
@@ -648,16 +661,16 @@ function showToast(msg) {{
 # ============ 邮件发送 ============
 def send_email(html_content, date_str):
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"📊 投融资日报 | {date_str}"
+    msg["Subject"] = f"📊 投融资周报 | {date_str}"
     msg["From"] = SMTP_USER
     msg["To"] = EMAIL_TO
-    msg.attach(MIMEText(f"投融资日报 {date_str}", "plain", "utf-8"))
+    msg.attach(MIMEText(f"投融资周报 {date_str}", "plain", "utf-8"))
     msg.attach(MIMEText(html_content, "html", "utf-8"))
-    yesterday = datetime.date.today() - datetime.timedelta(days=1)
+    last_monday, last_sunday = get_last_week_range()
     att = MIMEBase("text", "html")
     att.set_payload(html_content.encode("utf-8"))
     encoders.encode_base64(att)
-    att.add_header("Content-Disposition", "attachment", filename=f"daily_report_{yesterday.strftime('%Y%m%d')}.html")
+    att.add_header("Content-Disposition", "attachment", filename=f"weekly_report_{last_monday.strftime('%Y%m%d')}_{last_sunday.strftime('%Y%m%d')}.html")
     msg.attach(att)
     try:
         server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) if SMTP_PORT == 465 else smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
@@ -674,46 +687,45 @@ def send_email(html_content, date_str):
 
 # ============ 主流程 ============
 def main():
-    print(f"投融资日报生成 - {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"投融资周报生成 - {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     client = XiniuMCPClient(XINIU_MCP_URL)
     init_result = client.initialize()
     print(f"  MCP: {'OK' if init_result else 'FAIL'}")
 
-    # 1. 昨日投融资事件
-    rows, count = get_yesterday_events(client)
-    print(f"  昨日事件: {count}条")
+    last_monday, last_sunday = get_last_week_range()
+    prev_monday, prev_sunday = get_previous_week_range()
+    print(f"  报告区间: {last_monday} ~ {last_sunday}")
+    print(f"  对比区间: {prev_monday} ~ {prev_sunday}")
 
-    # 2. 前日数据
-    prev_rows, prev_count = get_previous_day_events(client)
+    # 1. 上周投融资事件
+    rows, count = get_last_week_events(client)
+    print(f"  上周事件: {count}条")
+
+    # 2. 上上周数据（用于同比）
+    prev_rows, prev_count = get_previous_week_events(client, columns=BASIC_QUERY_COLUMNS)
     prev_investor_count = len(set(safe_get(e, "fund_com_entity_gs_name", default="x") for e in prev_rows)) if prev_rows else 0
     prev_company_count = len(set(safe_get(e, "project_name", "company_gs_name", default="x") for e in prev_rows)) if prev_rows else 0
-    print(f"  前日事件: {prev_count}条")
+    print(f"  上上周事件: {prev_count}条")
 
-    # 3. 7天趋势
-    trend_rows, _ = get_7day_trend(client)
-    print(f"  7天数据: {len(trend_rows)}条")
+    # 3. 近4周趋势
+    trend_rows, _ = get_4week_trend(client)
+    print(f"  近4周数据: {len(trend_rows)}条")
 
-    # 昨日无数据则扩大范围
-    if count == 0:
-        print("  昨日无数据，获取最近7天...")
-        rows, count = get_recent_events(client, days=7)
-        print(f"  7天回退: {count}条")
+    # 4. 上周新设基金
+    fund_rows, fund_count = get_recent_funds(client)
+    print(f"  上周新设基金: {fund_count}条")
 
-    # 4. 新设基金
-    fund_rows, fund_count = get_new_funds(client, days=7)
-    print(f"  新设基金: {fund_count}条")
+    # 5. 上周LP出资
+    lp_rows, lp_count = get_recent_lp_events(client)
+    print(f"  上周LP出资: {lp_count}条")
 
-    # 5. LP出资
-    lp_rows, lp_count = get_lp_events(client, days=7)
-    print(f"  LP出资: {lp_count}条")
-
-    yesterday = datetime.date.today() - datetime.timedelta(days=1)
-    date_str = yesterday.strftime("%Y年%m月%d日")
+    date_str = f"{last_monday.strftime('%m月%d日')} - {last_sunday.strftime('%m月%d日')}"
+    date_range_str = f"{last_monday.strftime('%Y年%m月%d日')}—{last_sunday.strftime('%Y年%m月%d日')}"
 
     # 生成报告
     wx_content = generate_wx_report(
         rows, count, prev_count, prev_investor_count, prev_company_count,
-        trend_rows, fund_rows, lp_rows, date_str
+        trend_rows, fund_rows, lp_rows, date_str, date_range_str
     )
     full_html = generate_full_page(wx_content, date_str)
 
@@ -721,7 +733,7 @@ def main():
     output_dir = os.environ.get("GITHUB_OUTPUT_DIR", "")
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-        with open(os.path.join(output_dir, f"report_{yesterday.strftime('%Y%m%d')}.html"), "w", encoding="utf-8") as f:
+        with open(os.path.join(output_dir, f"weekly_report_{last_monday.strftime('%Y%m%d')}_{last_sunday.strftime('%Y%m%d')}.html"), "w", encoding="utf-8") as f:
             f.write(full_html)
         print(f"  报告已保存至 {output_dir}")
 
